@@ -1,0 +1,934 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Sign ITCs</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #fff; --ink: #1c2230; --muted: #5d6577; --line: #d9dde5;
+    --accent: #2457c5; --accent-ink: #fff; --accent-soft: #e8eefb;
+    --ok: #1f7a4d; --ok-soft: #e5f4ec; --warn: #9a5b00; --warn-soft: #fdf1dc; --off: #7a8190; --off-soft: #eef0f3;
+    --sig: #14205a; --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html { font-size: 15px; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif; line-height: 1.45; }
+  button, input, textarea { font: inherit; color: inherit; }
+  header.top { background: var(--panel); border-bottom: 1px solid var(--line); padding: 14px 24px; }
+  header.top h1 { margin: 0; font-size: 1.35rem; font-weight: 600; }
+  header.top p { margin: 2px 0 0; color: var(--muted); }
+  main { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 20px; padding: 20px 24px 60px; max-width: 1600px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
+  aside { align-self: start; position: sticky; top: 16px; display: grid; gap: 16px; }
+  @media (max-width: 900px) { aside { position: static; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+  .panel h2 { margin: 0 0 10px; font-size: 1rem; font-weight: 600; display: flex; gap: 8px; align-items: center; }
+  .step { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%;
+          background: var(--accent); color: var(--accent-ink); font-size: .8rem; }
+  label.field { display: grid; gap: 3px; margin-bottom: 10px; color: var(--muted); font-size: .9rem; }
+  label.field input { padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); }
+  label.field input[aria-invalid="true"] { border-color: #c0392b; }
+  .err { color: #c0392b; font-size: .85rem; min-height: 1.2em; margin: -6px 0 6px; }
+  .pad-wrap { position: relative; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  .pad-wrap::after { content: ""; position: absolute; left: 6%; right: 6%; bottom: 26%; border-bottom: 1px dashed #b9c0cd; pointer-events: none; }
+  #pad { display: block; width: 100%; aspect-ratio: 3 / 1; touch-action: none; cursor: crosshair; }
+  .pad-empty { position: absolute; inset: 0; display: grid; place-items: center; color: #9aa1ae; pointer-events: none; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  .btn { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  .btn:hover:not(:disabled) { border-color: #aeb6c5; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.wide { width: 100%; padding: 9px 12px; }
+  .check { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: .9rem; }
+  .muted { color: var(--muted); font-size: .9rem; }
+  .counts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-bottom: 12px; }
+  .counts div { background: var(--bg); border-radius: 6px; padding: 6px 8px; }
+  .counts b { display: block; font-size: 1.2rem; }
+  .counts span { color: var(--muted); font-size: .8rem; }
+  #message { margin: 10px 0 0; font-size: .9rem; }
+  #message.ok { color: var(--ok); } #message.warn { color: var(--warn); }
+  .drop { border: 2px dashed #b9c0cd; border-radius: var(--radius); background: var(--panel); padding: 36px 20px;
+          text-align: center; transition: border-color .15s, background .15s; }
+  .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  .drop.compact { padding: 12px 16px; display: flex; gap: 12px; align-items: center; justify-content: space-between; text-align: left; }
+  .drop h2 { margin: 0 0 4px; font-size: 1.1rem; font-weight: 600; }
+  .drop.compact h2 { font-size: 1rem; margin: 0; }
+  .drop p { margin: 0 0 12px; color: var(--muted); }
+  .drop.compact p { margin: 0; }
+  #leftout { margin-top: 16px; }
+  #leftout summary { cursor: pointer; font-weight: 600; }
+  #leftout ul { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+  #leftout li { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  #leftout .path { word-break: break-all; }
+  #leftout .why { color: var(--muted); font-size: .85rem; }
+  .progress { margin-top: 16px; }
+  .bar { height: 6px; background: var(--off-soft); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .bar > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  #cards { margin-top: 16px; display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
+  @media (max-width: 480px) { #cards { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); display: flex; flex-direction: column; }
+  .card.signed { border-color: var(--ok); box-shadow: 0 0 0 1px var(--ok) inset; }
+  .card.unticked .sheet { opacity: .55; }
+  .card header { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .card header label { display: flex; gap: 8px; align-items: center; min-width: 0; font-weight: 600; }
+  .card .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { flex: none; font-size: .75rem; border-radius: 999px; padding: 2px 8px; background: var(--off-soft); color: var(--off); white-space: nowrap; }
+  .badge.ok { background: var(--ok-soft); color: var(--ok); }
+  .badge.warn { background: var(--warn-soft); color: var(--warn); }
+  .badge.info { background: var(--accent-soft); color: var(--accent); }
+  .sheet { position: relative; margin: 10px 12px 0; border: 1px solid var(--line); background: #fff; aspect-ratio: 1 / 1.414; }
+  .sheet canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .sheet canvas.ov { cursor: crosshair; }
+  .sheet .loading { position: absolute; inset: 0; display: grid; place-items: center; color: #9aa1ae; }
+  .pnav { display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 6px; font-size: .85rem; color: var(--muted); }
+  .pnav button { padding: 0 8px; }
+  .pnav .pages { display: flex; gap: 10px; align-items: center; }
+  .pnav .zoom { padding: 2px 10px; font-size: .82rem; }
+  .card .how { margin: 6px 12px 0; font-size: .82rem; color: var(--muted); min-height: 1.2em; }
+  .card .how button { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; text-decoration: underline; font-size: inherit; }
+  .card footer { padding: 10px 12px 12px; display: grid; gap: 8px; margin-top: auto; }
+  .card textarea { width: 100%; min-height: 54px; resize: vertical; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  .card.cover { opacity: .8; }
+  .privacy { font-size: .85rem; color: var(--muted); }
+  .hidden { display: none !important; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"
+        integrity="sha384-weMABwrltA6jWR8DDe9Jp5blk+tZQh7ugpCsF3JwSA53WZM9/14PjS5LAJNHNjAI" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.2/jszip.min.js"
+        integrity="sha384-DdGlNq+wVXAn83gXqwyeFHB7iyXy6L0rLrNzgDmhKWPjiJLg9vj6qosYmZmkMfQ+" crossorigin="anonymous"></script>
+<script src="sign-core.js"></script>
+</head>
+<body>
+<header class="top">
+  <h1>Sign ITCs</h1>
+  <p id="who">Sign a batch of inspection and test checksheets in one go.</p>
+</header>
+
+<main>
+  <aside>
+    <section class="panel">
+      <h2><span class="step">1</span> Your details</h2>
+      <label class="field">Name <input id="name" autocomplete="name"></label>
+      <label class="field">Date (dd/mm/yyyy) <input id="date" inputmode="numeric"></label>
+      <div class="err" id="date-err"></div>
+    </section>
+
+    <section class="panel">
+      <h2><span class="step">2</span> Your signature</h2>
+      <div class="pad-wrap">
+        <canvas id="pad" width="900" height="300" aria-label="Signature pad: draw your signature"></canvas>
+        <div class="pad-empty" id="pad-empty">Draw your signature here</div>
+      </div>
+      <div class="row">
+        <button class="btn" id="pad-clear" type="button">Clear</button>
+        <button class="btn" id="pad-upload" type="button">Upload image</button>
+        <input type="file" id="pad-file" accept="image/*" class="hidden">
+      </div>
+      <label class="check" style="margin-top:10px"><input type="checkbox" id="remember"> Remember on this computer</label>
+    </section>
+
+    <section class="panel">
+      <h2><span class="step">3</span> Sign and download</h2>
+      <div class="counts">
+        <div><b id="n-itcs">0</b><span>ITCs</span></div>
+        <div><b id="n-ready">0</b><span>ready to sign</span></div>
+        <div><b id="n-click">0</b><span>need a click</span></div>
+        <div><b id="n-signed">0</b><span>signed</span></div>
+      </div>
+      <button class="btn primary wide" id="sign-all" type="button" disabled>Sign all ticked</button>
+      <div class="row"><button class="btn wide" id="download" type="button" disabled>Download signed PDF</button></div>
+      <p id="message" role="status" aria-live="polite"></p>
+    </section>
+    <p class="privacy">Your files stay on this computer. Nothing is uploaded; the page only loads its own code.</p>
+  </aside>
+
+  <section>
+    <div class="drop" id="drop">
+      <div>
+        <h2 id="drop-title">Drop the PDF or zip here</h2>
+        <p id="drop-text">The sign pack, several PDFs, or the zip OneDrive gives you. No need to extract it.</p>
+      </div>
+      <div>
+        <button class="btn primary" id="choose" type="button">Choose file</button>
+        <input type="file" id="file" multiple accept=".pdf,.zip,application/pdf,application/zip" class="hidden">
+      </div>
+    </div>
+
+    <div class="progress hidden" id="progress">
+      <div class="muted" id="progress-text"></div>
+      <div class="bar"><div id="progress-bar"></div></div>
+    </div>
+
+    <details id="leftout" class="panel hidden">
+      <summary id="leftout-title"></summary>
+      <p class="muted" style="margin:8px 0 0">Tick a file to bring it back in if it was left out by mistake.</p>
+      <ul id="leftout-list"></ul>
+    </details>
+
+    <div id="cards"></div>
+  </section>
+</main>
+
+<script type="module">
+import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.3.289/build/pdf.min.mjs';
+
+const PDFJS = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.3.289/';
+const TESSERACT = 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js';
+const STORE_KEY = 'signItcs.signature';
+const OCR_PART = 0.45;
+const ZOOM_W = 0.62, ZOOM_H = 0.3;
+pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + 'build/pdf.worker.min.mjs';
+
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const S = {
+  project: (params.get('project') || '').trim(),
+  company: (params.get('company') || '').trim(),
+  headings: params.getAll('heading').map((h) => h.trim()).filter(Boolean),
+  sig: null,          // {png: Uint8Array, img: HTMLImageElement, aspect}
+  files: [],          // every dropped file, included or not
+  groups: [],         // one per ITC across the included files
+  zipName: '',
+  busy: false,
+  downloaded: true,
+};
+const findOpts = S.headings.length ? { headings: S.headings.concat(SignCore.DEFAULTS.headings) } : undefined;
+
+/* ---------- details ---------- */
+function today() {
+  const d = new Date();
+  return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+}
+$('name').value = (params.get('name') || '').trim();
+$('date').value = today();
+{
+  const bits = [];
+  if (S.project) bits.push('Project ' + S.project);
+  if ($('name').value) bits.push('Signing as ' + $('name').value + (S.company ? ', ' + S.company : ''));
+  if (bits.length) $('who').textContent = bits.join(' · ');
+}
+const nameText = () => SignCore.plainText($('name').value.trim());
+function dateOk() {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec($('date').value.trim());
+  if (!m) return false;
+  const d = new Date(+m[3], +m[2] - 1, +m[1]);
+  return d.getDate() === +m[1] && d.getMonth() === +m[2] - 1;
+}
+const dateText = () => $('date').value.trim();
+for (const id of ['name', 'date']) $(id).addEventListener('input', () => {
+  const ok = dateOk();
+  $('date').setAttribute('aria-invalid', ok ? 'false' : 'true');
+  $('date-err').textContent = ok ? '' : 'Use dd/mm/yyyy, e.g. ' + today();
+  redrawAll(); refresh();
+});
+
+/* ---------- signature pad ---------- */
+const pad = $('pad'), pctx = pad.getContext('2d');
+let drawing = null, padDirty = false;
+function padPoint(e) {
+  const r = pad.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * pad.width / r.width, y: (e.clientY - r.top) * pad.height / r.height };
+}
+pad.addEventListener('pointerdown', (e) => {
+  pad.setPointerCapture(e.pointerId);
+  drawing = [padPoint(e)];
+  pctx.lineCap = pctx.lineJoin = 'round';
+  pctx.strokeStyle = '#14205a';
+  pctx.lineWidth = 5;
+  pctx.beginPath(); pctx.arc(drawing[0].x, drawing[0].y, 2.5, 0, Math.PI * 2); pctx.fillStyle = '#14205a'; pctx.fill();
+  $('pad-empty').classList.add('hidden');
+});
+pad.addEventListener('pointermove', (e) => {
+  if (!drawing) return;
+  const p = padPoint(e), pts = drawing;
+  pts.push(p);
+  if (pts.length < 3) return;
+  const a = pts[pts.length - 3], b = pts[pts.length - 2];
+  pctx.beginPath();
+  pctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
+  pctx.quadraticCurveTo(b.x, b.y, (b.x + p.x) / 2, (b.y + p.y) / 2);
+  pctx.stroke();
+});
+const endStroke = () => { if (drawing) { drawing = null; padDirty = true; exportSignature(); } };
+pad.addEventListener('pointerup', endStroke);
+pad.addEventListener('pointercancel', endStroke);
+
+$('pad-clear').addEventListener('click', () => {
+  pctx.clearRect(0, 0, pad.width, pad.height);
+  $('pad-empty').classList.remove('hidden');
+  S.sig = null; padDirty = false;
+  store(null);
+  unsignAll('Signature cleared. Sign again once you have a new one.');
+});
+$('pad-upload').addEventListener('click', () => $('pad-file').click());
+$('pad-file').addEventListener('change', async () => {
+  const f = $('pad-file').files[0];
+  $('pad-file').value = '';
+  if (!f) return;
+  try {
+    const img = await loadImage(URL.createObjectURL(f));
+    const c = document.createElement('canvas');
+    const k = Math.min(1, 1600 / img.naturalWidth);
+    c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+    const cx = c.getContext('2d');
+    cx.drawImage(img, 0, 0, c.width, c.height);
+    const data = cx.getImageData(0, 0, c.width, c.height);
+    SignCore.whiteToAlpha(data.data);
+    cx.putImageData(data, 0, 0);
+    const box = SignCore.trimBox(data.data, c.width, c.height, 2);
+    if (!box) { say('That image looks blank. Try a darker signature on white paper.', 'warn'); return; }
+    drawOnPad(c, box);
+    padDirty = true;
+    await exportSignature();
+  } catch (e) {
+    say('That image could not be read.', 'warn');
+  }
+});
+function drawOnPad(src, box) {
+  pctx.clearRect(0, 0, pad.width, pad.height);
+  const k = Math.min((pad.width * 0.9) / box.w, (pad.height * 0.8) / box.h);
+  const w = box.w * k, h = box.h * k;
+  pctx.drawImage(src, box.x, box.y, box.w, box.h, (pad.width - w) / 2, (pad.height - h) / 2, w, h);
+  $('pad-empty').classList.add('hidden');
+}
+function loadImage(url) {
+  return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+}
+async function exportSignature() {
+  const data = pctx.getImageData(0, 0, pad.width, pad.height);
+  const box = SignCore.trimBox(data.data, pad.width, pad.height, 4);
+  if (!box) { S.sig = null; refresh(); return; }
+  const c = document.createElement('canvas');
+  c.width = box.w; c.height = box.h;
+  c.getContext('2d').drawImage(pad, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+  const url = c.toDataURL('image/png');
+  S.sig = { png: dataUrlBytes(url), img: await loadImage(url), aspect: box.w / box.h };
+  if ($('remember').checked) store(url);
+  redrawAll(); refresh();
+}
+function dataUrlBytes(url) {
+  const bin = atob(url.split(',')[1]);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function store(url) {
+  try { if (url) localStorage.setItem(STORE_KEY, url); else localStorage.removeItem(STORE_KEY); } catch (e) { /* storage off */ }
+}
+$('remember').addEventListener('change', () => {
+  if (!$('remember').checked) store(null);
+  else if (S.sig) exportSignature();
+});
+(async () => {
+  let url = null;
+  try { url = localStorage.getItem(STORE_KEY); } catch (e) { /* storage off */ }
+  if (!url) return;
+  try {
+    const img = await loadImage(url);
+    drawOnPad(img, { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight });
+    $('remember').checked = true;
+    await exportSignature();
+  } catch (e) { store(null); }
+})();
+
+/* ---------- messages ---------- */
+function say(text, kind) {
+  $('message').textContent = text || '';
+  $('message').className = kind || '';
+}
+function progress(text, done, total) {
+  $('progress').classList.toggle('hidden', !text);
+  $('progress-text').textContent = text || '';
+  $('progress-bar').style.width = total ? Math.round(100 * done / total) + '%' : '0';
+}
+
+/* ---------- reading what was dropped ---------- */
+const drop = $('drop');
+$('choose').addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', () => { const f = [...$('file').files]; $('file').value = ''; if (f.length) load(f); });
+drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); const f = [...e.dataTransfer.files]; if (f.length) load(f); });
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => e.preventDefault());
+
+async function load(list) {
+  if (S.busy) return;
+  if (S.groups.some((g) => g.signed) && !S.downloaded &&
+      !confirm('Start again with these files? Signing you have not downloaded yet will be lost.')) return;
+  S.busy = true;
+  for (const f of S.files) if (f.pdf) f.pdf.loadingTask.destroy();
+  S.files = []; S.groups = [];
+  $('cards').innerHTML = '';
+  say('');
+  list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  try {
+    const entries = [];
+    for (const f of list) {
+      if (/\.zip$/i.test(f.name)) {
+        let zip;
+        try { zip = await JSZip.loadAsync(f); } catch (e) {
+          entries.push({ path: f.name, error: 'Zip could not be opened' }); continue;
+        }
+        const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir)
+          .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+        for (const n of names) entries.push({ path: n, read: () => zip.files[n].async('uint8array') });
+      } else {
+        entries.push({ path: f.name, read: async () => new Uint8Array(await f.arrayBuffer()) });
+      }
+    }
+    let n = 0;
+    for (const e of entries) {
+      progress('Reading files: ' + (++n) + ' of ' + entries.length, n, entries.length);
+      const file = { id: S.files.length, path: e.path, title: e.path.split('/').pop().replace(/\.pdf$/i, ''), read: e.read };
+      S.files.push(file);
+      file.reason = e.error || SignCore.leaveOutReason({ path: e.path });
+      if (!file.reason) await analyse(file);
+      file.include = !file.reason;
+    }
+    S.zipName = list.length === 1 && /\.zip$/i.test(list[0].name) ? list[0].name : '';
+    progress('');
+    rebuild();
+  } finally {
+    S.busy = false;
+    refresh();
+  }
+  runOcr();
+}
+
+// Reads a PDF: text, client blocks, QCMS hints, bookmarks. Sets file.reason if it should be left out.
+async function analyse(file) {
+  try {
+    file.bytes = await file.read();
+    const task = pdfjsLib.getDocument({
+      data: file.bytes.slice(), cMapUrl: PDFJS + 'cmaps/', cMapPacked: true,
+      standardFontDataUrl: PDFJS + 'standard_fonts/', wasmUrl: PDFJS + 'wasm/', isEvalSupported: false,
+    });
+    const pdf = await task.promise;
+    file.pdf = pdf;
+    const meta = await pdf.getMetadata().catch(() => ({}));
+    const info = meta.info || {};
+    file.signed = SignCore.isSigned(info.Keywords);
+    const custom = info.Custom; // a Map in pdf.js 6, a plain object in older versions
+    const qcms = SignCore.parseQcms(custom instanceof Map ? custom.get('QCMS') : custom && custom.QCMS);
+    file.pages = [];
+    for (let i = 0; i < pdf.numPages; i++) {
+      const page = await pdf.getPage(i + 1);
+      const v = page.view;
+      const box = { x0: v[0], y0: v[1], x1: v[2], y1: v[3] };
+      const items = SignCore.textItems(await page.getTextContent());
+      const pg = { file, index: i, box, rotate: page.rotate, hasText: items.some((t) => t.str.trim()) };
+      const block = SignCore.findClientBlock(items, box, findOpts);
+      if (block && block.sigFilled) pg.sigFilled = true; else pg.block = block;
+      const hint = qcms && qcms.pages[i];
+      if (!pg.block && !pg.sigFilled && hint && hint.client) pg.hint = hint;
+      file.pages.push(pg);
+      page.cleanup();
+    }
+    file.marks = await bookmarks(pdf);
+    file.hasText = file.pages.some((p) => p.hasText);
+    file.hasBlock = file.pages.some((p) => p.block || p.hint);
+    // "text but no block" only when every page has text: a scanned page may still hold a block
+    const allText = file.pages.every((p) => p.hasText);
+    file.reason = SignCore.leaveOutReason({ path: file.path, signed: file.signed, hasText: allText, hasBlock: file.hasBlock });
+  } catch (e) {
+    file.reason = e && e.name === 'PasswordException' ? 'Password protected' : 'Could not be opened as a PDF';
+  }
+}
+
+async function bookmarks(pdf) {
+  const outline = await pdf.getOutline().catch(() => null);
+  const marks = [];
+  for (const item of outline || []) {
+    try {
+      let dest = item.dest;
+      if (typeof dest === 'string') dest = await pdf.getDestination(dest);
+      if (!Array.isArray(dest) || dest[0] == null) continue;
+      const page = typeof dest[0] === 'number' ? dest[0] : await pdf.getPageIndex(dest[0]);
+      marks.push({ title: item.title, page });
+    } catch (e) { /* bookmark without a page */ }
+  }
+  return marks;
+}
+
+/* ---------- groups and cards ---------- */
+function rebuild() {
+  S.groups = [];
+  for (const f of S.files.filter((x) => x.include && x.pages)) {
+    for (const g of SignCore.groupPages(f.pages.length, f.marks, f.title)) {
+      const pages = g.pages.map((i) => f.pages[i]);
+      const group = { id: S.groups.length, file: f, title: g.title, cover: !!g.cover, pages, signed: false, note: '', zoom: true };
+      group.hasText = pages.some((p) => p.hasText);
+      group.shown = pages.indexOf(pages.find((p) => place(p)) || pages[pages.length - 1]);
+      group.ticked = !group.cover && (candidates(group).length > 0 || !group.hasText);
+      group.collapsed = group.cover && !candidates(group).length;
+      S.groups.push(group);
+    }
+  }
+  renderLeftOut();
+  renderCards();
+  const loaded = S.files.length > 0;
+  drop.classList.toggle('compact', loaded);
+  $('drop-title').textContent = loaded ? 'Different files?' : 'Drop the PDF or zip here';
+  $('drop-text').textContent = loaded ? 'Drop them here to start again.' : 'The sign pack, several PDFs, or the zip OneDrive gives you. No need to extract it.';
+  S.downloaded = true;
+  refresh();
+}
+
+function renderLeftOut() {
+  const out = S.files.filter((f) => f.reason);
+  $('leftout').classList.toggle('hidden', !out.length);
+  $('leftout-title').textContent = out.length + (out.length === 1 ? ' file left out' : ' files left out');
+  const ul = $('leftout-list');
+  ul.innerHTML = '';
+  for (const f of out) {
+    const li = document.createElement('li');
+    const canSign = /\.pdf$/i.test(f.path) && !/System file|Password|Could not/.test(f.reason);
+    if (canSign) {
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = f.include;
+      cb.setAttribute('aria-label', 'Include ' + f.path);
+      cb.addEventListener('change', async () => {
+        if (cb.checked && !f.pages) {
+          cb.disabled = true;
+          const reason = f.reason;
+          await analyse(f);
+          cb.disabled = false;
+          if (!f.pages) { cb.checked = false; say(f.path + ': ' + f.reason, 'warn'); return; }
+          f.reason = reason;
+        }
+        f.include = cb.checked;
+        const done = S.groups.filter((g) => g.signed || g.note).map((g) => g.file.id + '|' + g.title);
+        rebuild();
+        if (done.length) say('Files changed: check the ticks and sign again where needed.', 'warn');
+        runOcr();
+      });
+      li.append(cb);
+    }
+    const p = document.createElement('span'); p.className = 'path'; p.textContent = f.path;
+    const w = document.createElement('span'); w.className = 'why'; w.textContent = f.reason;
+    li.append(p, w);
+    ul.append(li);
+  }
+}
+
+// Pages of a group that have somewhere to sign.
+function candidates(g) { return g.pages.filter((p) => place(p)); }
+
+function method(pg) {
+  if (pg.manual) return pg.copied ? 'copied' : 'click';
+  if (pg.block) return 'text';
+  if (pg.hint) return 'hint';
+  if (pg.ocr) return 'ocr';
+  return null;
+}
+const METHOD = {
+  text: ['Found on sheet', 'ok', 'Found from the words on the sheet.'],
+  hint: ['From the sender', 'ok', 'Position supplied with the pack.'],
+  ocr: ['Read from scan', 'ok', 'Found by reading the scanned sheet.'],
+  click: ['Placed by you', 'info', 'Placed where you clicked.'],
+  copied: ['Placed by you', 'info', 'Copied from where you clicked on another sheet.'],
+};
+
+// What to draw on a page, or null.
+function place(pg) {
+  if (pg.sigFilled && !pg.manual) return null;
+  const name = nameText(), date = dateText();
+  if (pg.manual) return SignCore.placement({ box: pg.box, auto: pg.block || pg.ocr, manual: pg.manual }, name, date);
+  if (pg.block) return SignCore.placement({ box: pg.box, auto: pg.block }, name, date);
+  if (pg.hint) return SignCore.hintPlacement(pg.hint, pg.box, name, date);
+  if (pg.ocr) return SignCore.placement({ box: pg.box, auto: pg.ocr }, name, date);
+  return null;
+}
+
+function state(g) {
+  if (candidates(g).length) return 'ready';
+  if (g.ocrPending) return 'reading';
+  if (g.cover) return 'cover';
+  if (!g.hasText) return 'click';
+  return 'none';
+}
+
+const observer = new IntersectionObserver((entries) => {
+  for (const e of entries) if (e.isIntersecting) { observer.unobserve(e.target); renderSheet(S.groups[+e.target.dataset.id]); }
+}, { rootMargin: '400px' });
+
+function renderCards() {
+  const wrap = $('cards');
+  wrap.innerHTML = '';
+  for (const g of S.groups) {
+    const card = document.createElement('article');
+    card.className = 'card';
+    card.dataset.id = g.id;
+    card.innerHTML = `
+      <header><label><input type="checkbox" class="tick"><span class="title"></span></label><span class="badge"></span></header>
+      <div class="sheet"><div class="loading">Loading…</div><canvas class="pdf"></canvas><canvas class="ov"></canvas></div>
+      <div class="pnav"><span class="pages"><button class="btn prev" type="button" aria-label="Previous page">‹</button><span class="pno"></span><button class="btn next" type="button" aria-label="Next page">›</button></span><button class="btn zoom" type="button"></button></div>
+      <p class="how"></p>
+      <footer>
+        <button class="btn primary sign" type="button">Sign</button>
+        <textarea class="note hidden" placeholder="Note for the sender (optional), e.g. item 7 needs a photo"></textarea>
+      </footer>`;
+    g.el = card;
+    const q = (s) => card.querySelector(s);
+    q('.title').textContent = g.title;
+    q('.title').title = g.title;
+    q('.tick').checked = g.ticked;
+    q('.tick').setAttribute('aria-label', 'Tick to sign ' + g.title);
+    q('.tick').addEventListener('change', () => {
+      g.ticked = q('.tick').checked;
+      if (!g.ticked) g.signed = false;
+      updateCard(g); refresh();
+      if (!g.ticked) q('.note').focus();
+    });
+    q('.sign').addEventListener('click', () => signOne(g));
+    q('.note').addEventListener('input', () => { g.note = q('.note').value; S.downloaded = false; refresh(); });
+    q('.prev').addEventListener('click', () => { g.shown = Math.max(0, g.shown - 1); renderSheet(g); });
+    q('.next').addEventListener('click', () => { g.shown = Math.min(g.pages.length - 1, g.shown + 1); renderSheet(g); });
+    q('.ov').addEventListener('click', (e) => clickPlace(g, e));
+    q('.zoom').addEventListener('click', () => {
+      if (g.collapsed) g.collapsed = false; else g.zoom = !g.zoom;
+      renderSheet(g);
+    });
+    q('.pages').classList.toggle('hidden', g.pages.length < 2);
+    wrap.append(card);
+    updateCard(g);
+    observer.observe(card);
+  }
+}
+
+function updateCard(g) {
+  const q = (s) => g.el.querySelector(s);
+  const st = state(g), pg = g.pages[g.shown], m = method(pg);
+  g.el.classList.toggle('signed', g.signed);
+  g.el.classList.toggle('unticked', !g.ticked);
+  g.el.classList.toggle('cover', st === 'cover' || st === 'none');
+  const badge = q('.badge');
+  let label, kind;
+  if (g.signed) [label, kind] = ['Signed', 'ok'];
+  else if (st === 'ready') [label, kind] = METHOD[method(candidates(g)[0])];
+  else if (st === 'reading') [label, kind] = ['Reading scan…', 'info'];
+  else if (st === 'click') [label, kind] = ['Click to place', 'warn'];
+  else if (st === 'cover') [label, kind] = ['Cover page', ''];
+  else [label, kind] = ['No sign-off block', ''];
+  badge.textContent = label;
+  badge.className = 'badge ' + kind;
+  const how = q('.how');
+  how.textContent = '';
+  if (m) {
+    how.textContent = METHOD[m][2] + ' Click on the sheet to move it. ';
+    if (pg.manual) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = pg.block || pg.hint || pg.ocr ? 'Put it back' : 'Remove';
+      b.addEventListener('click', () => { pg.manual = null; pg.copied = false; afterPlace(g); renderSheet(g); });
+      how.append(b);
+    }
+  } else if (st === 'click' || st === 'reading') how.textContent = 'Click on the sheet where your signature goes.';
+  else if (candidates(g).length) how.textContent = 'Nothing to sign on this page. Signature is on page ' + (g.pages.indexOf(candidates(g)[0]) + 1) + '.';
+  else how.textContent = 'No client sign-off block found. Tick it and click on the sheet if it does need signing.';
+  q('.sheet').classList.toggle('hidden', !!g.collapsed);
+  const zb = q('.zoom');
+  zb.textContent = g.collapsed ? 'Show sheet' : g.zoom ? 'Whole sheet' : 'Zoom to signature';
+  zb.classList.toggle('hidden', !g.collapsed && !place(pg));
+  q('.pno').textContent = 'Page ' + (g.shown + 1) + ' of ' + g.pages.length;
+  q('.prev').disabled = g.shown === 0;
+  q('.next').disabled = g.shown === g.pages.length - 1;
+  const sign = q('.sign');
+  sign.textContent = g.signed ? 'Signed ✓  (click to undo)' : 'Sign';
+  sign.classList.toggle('primary', !g.signed);
+  sign.disabled = !g.ticked;
+  const note = q('.note');
+  note.classList.toggle('hidden', g.ticked);
+  if (note.value !== g.note) note.value = g.note;
+}
+
+/* ---------- drawing a sheet ---------- */
+let renderChain = Promise.resolve();
+function renderSheet(g) {
+  if (g.collapsed) { updateCard(g); return renderChain; }
+  renderChain = renderChain.then(() => doRender(g)).catch(() => {});
+  updateCard(g);
+  return renderChain;
+}
+async function doRender(g) {
+  const pg = g.pages[g.shown];
+  const sheet = g.el.querySelector('.sheet');
+  const canvas = g.el.querySelector('.pdf'), ov = g.el.querySelector('.ov');
+  const page = await pg.file.pdf.getPage(pg.index + 1);
+  const base = page.getViewport({ scale: 1 });
+  // Zoomed: a window around the signature (ZOOM_W x ZOOM_H of the page), else the whole sheet.
+  const pl = g.zoom ? place(pg) : null;
+  const cw = pl ? base.width * ZOOM_W : base.width, ch = pl ? base.height * ZOOM_H : base.height;
+  sheet.style.aspectRatio = cw + ' / ' + ch;
+  const cssW = sheet.clientWidth || 400;
+  const scale = (cssW * Math.min(2, window.devicePixelRatio || 1)) / cw;
+  let vp = page.getViewport({ scale });
+  if (pl) {
+    const c = vp.convertToViewportPoint(pl.sig.x + Math.min(pl.sig.maxW, pl.sig.h * 3.5) / 2, pl.sig.y);
+    const left = Math.max(0, Math.min(vp.width - cw * scale, c[0] - cw * scale / 2));
+    const top = Math.max(0, Math.min(vp.height - ch * scale, c[1] - ch * scale * 0.45));
+    vp = page.getViewport({ scale, offsetX: -left, offsetY: -top });
+  }
+  canvas.width = ov.width = Math.round(cw * scale);
+  canvas.height = ov.height = Math.round(ch * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, canvas, viewport: vp }).promise;
+  g.vp = vp; g.vpPage = g.shown;
+  sheet.querySelector('.loading')?.remove();
+  drawOverlay(g);
+}
+
+function drawOverlay(g) {
+  const ov = g.el && g.el.querySelector('.ov');
+  if (!ov || !g.vp || g.vpPage !== g.shown) return;
+  const ctx = ov.getContext('2d'), vp = g.vp;
+  ctx.clearRect(0, 0, ov.width, ov.height);
+  const pg = g.pages[g.shown], pl = place(pg);
+  if (!pl) return;
+  ctx.globalAlpha = g.signed ? 1 : g.ticked ? 0.55 : 0.25;
+  const r = S.sig ? SignCore.fitImage(pl.sig, S.sig.aspect)
+    : { x: pl.sig.x, y: pl.sig.y, w: Math.min(pl.sig.maxW, pl.sig.h * 3.5), h: pl.sig.h };
+  const a = vp.convertToViewportPoint(r.x, r.y), b = vp.convertToViewportPoint(r.x + r.w, r.y + r.h);
+  const x = Math.min(a[0], b[0]), y = Math.min(a[1], b[1]), w = Math.abs(b[0] - a[0]), h = Math.abs(b[1] - a[1]);
+  if (S.sig) ctx.drawImage(S.sig.img, x, y, w, h);
+  else {
+    ctx.setLineDash([6, 4]); ctx.strokeStyle = '#2457c5'; ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = '#2457c5'; ctx.font = Math.max(10, h * 0.45) + 'px sans-serif';
+    ctx.fillText('Signature', x + 6, y + h * 0.7);
+  }
+  ctx.fillStyle = '#14205a';
+  for (const t of pl.texts) {
+    const p = vp.convertToViewportPoint(t.x, t.y);
+    ctx.font = (t.size * vp.scale) + 'px Helvetica, Arial, sans-serif';
+    ctx.fillText(t.str, p[0], p[1]);
+  }
+  ctx.globalAlpha = 1;
+}
+function redrawAll() { for (const g of S.groups) { drawOverlay(g); } }
+
+/* ---------- click to place ---------- */
+function clickPlace(g, e) {
+  if (!g.vp || g.vpPage !== g.shown) return;
+  const ov = e.currentTarget, r = ov.getBoundingClientRect();
+  const [x, y] = g.vp.convertToPdfPoint((e.clientX - r.left) * ov.width / r.width, (e.clientY - r.top) * ov.height / r.height);
+  const pg = g.pages[g.shown];
+  const needed = !candidates(g).length;
+  pg.manual = { x, y }; pg.copied = false;
+  g.ticked = true;
+  g.el.querySelector('.tick').checked = true;
+  // First placement on a sheet with nothing found: copy the spot to the other sheets that still need one.
+  if (needed && !g.hasText) {
+    const fx = (x - pg.box.x0) / (pg.box.x1 - pg.box.x0), fy = (y - pg.box.y0) / (pg.box.y1 - pg.box.y0);
+    for (const o of S.groups) {
+      if (o === g || state(o) !== 'click') continue;
+      const op = o.pages[o.pages.length - 1];
+      op.manual = { x: op.box.x0 + fx * (op.box.x1 - op.box.x0), y: op.box.y0 + fy * (op.box.y1 - op.box.y0) };
+      op.copied = true;
+      o.shown = o.pages.length - 1;
+      afterPlace(o);
+      if (o.vp) renderSheet(o);
+    }
+  }
+  afterPlace(g);
+  if (needed) renderSheet(g); // zoom in on the new spot
+}
+function afterPlace(g) {
+  if (!candidates(g).length) g.signed = false;
+  S.downloaded = S.downloaded && !g.signed;
+  drawOverlay(g); updateCard(g); refresh();
+}
+
+/* ---------- signing ---------- */
+function canSign(showWhy) {
+  if (!S.sig) { if (showWhy) { say('Draw or upload your signature first (step 2).', 'warn'); pad.scrollIntoView({ block: 'center', behavior: 'smooth' }); } return false; }
+  if (!nameText()) { if (showWhy) { say('Enter your name first (step 1).', 'warn'); $('name').focus(); } return false; }
+  if (!dateOk()) { if (showWhy) { say('Check the date (step 1).', 'warn'); $('date').focus(); } return false; }
+  return true;
+}
+function signOne(g) {
+  if (g.signed) { g.signed = false; }
+  else {
+    if (!canSign(true)) return;
+    if (!candidates(g).length) { say('Click on the sheet where your signature goes, then press Sign.', 'warn'); return; }
+    g.signed = true;
+    say('');
+  }
+  S.downloaded = false;
+  drawOverlay(g); updateCard(g); refresh();
+}
+$('sign-all').addEventListener('click', () => {
+  if (!canSign(true)) return;
+  let n = 0;
+  const waiting = [];
+  for (const g of S.groups) {
+    if (!g.ticked || g.signed) continue;
+    if (candidates(g).length) { g.signed = true; n++; drawOverlay(g); updateCard(g); }
+    else waiting.push(g);
+  }
+  S.downloaded = S.downloaded && n === 0;
+  if (waiting.length) {
+    say(`Signed ${n}. ${waiting.length} ticked ${waiting.length === 1 ? 'sheet needs' : 'sheets need'} a click to place the signature first.`, 'warn');
+    waiting[0].el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  } else say(n ? `Signed ${n}. Check them, then download.` : 'Everything ticked is already signed.', 'ok');
+  refresh();
+});
+function unsignAll(msg) {
+  let any = false;
+  for (const g of S.groups) if (g.signed) { g.signed = false; any = true; updateCard(g); }
+  redrawAll(); refresh();
+  if (any) say(msg, 'warn');
+}
+
+$('download').addEventListener('click', async () => {
+  const signed = S.groups.filter((g) => g.signed);
+  const notes = S.groups.filter((g) => !g.signed && g.note.trim()).map((g) => ({ label: g.title, note: g.note.trim() }));
+  if (signed.length && !canSign(true)) return;
+  const btn = $('download');
+  btn.disabled = true;
+  say('Making the signed PDF…');
+  try {
+    const inc = S.files.filter((f) => f.include && f.pages);
+    let bytes, offset = new Map();
+    if (inc.length === 1) { bytes = inc[0].bytes; offset.set(inc[0], 0); }
+    else {
+      bytes = await SignCore.combinePdfs(PDFLib, inc.map((f) => ({ title: f.title, bytes: f.bytes })));
+      let at = 0;
+      for (const f of inc) { offset.set(f, at); at += f.pages.length; }
+    }
+    const pages = [];
+    for (const g of signed) for (const pg of g.pages) {
+      const pl = place(pg);
+      if (pl) pages.push({ index: offset.get(pg.file) + pg.index, place: pl });
+    }
+    if (pages.length) bytes = await SignCore.stampPdf(PDFLib, bytes, pages, S.sig.png, { name: nameText(), date: dateText() });
+    if (notes.length) bytes = await SignCore.addNotesPage(PDFLib, bytes, notes, { name: nameText(), date: dateText() });
+    // named after the one PDF signed, else the zip, else a dated name
+    const source = inc.length === 1 ? inc[0].path.split('/').pop() : S.zipName;
+    const name = SignCore.outputName(source, S.project, dateText());
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    a.download = name;
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    S.downloaded = true;
+    say(`Saved "${name}" (${signed.length} signed${notes.length ? ', ' + notes.length + ' with notes' : ''}). Upload it to the Signed folder.`, 'ok');
+  } catch (e) {
+    console.error(e);
+    say('The signed PDF could not be made: ' + (e && e.message ? e.message : e), 'warn');
+  } finally {
+    btn.disabled = false;
+    refresh();
+  }
+});
+window.addEventListener('beforeunload', (e) => {
+  if (!S.downloaded && S.groups.some((g) => g.signed || g.note)) { e.preventDefault(); e.returnValue = ''; }
+});
+
+function refresh() {
+  const gs = S.groups.filter((g) => !g.cover || candidates(g).length);
+  $('n-itcs').textContent = gs.length;
+  $('n-ready').textContent = gs.filter((g) => !g.signed && g.ticked && candidates(g).length).length;
+  $('n-click').textContent = gs.filter((g) => g.ticked && !candidates(g).length).length;
+  $('n-signed').textContent = gs.filter((g) => g.signed).length;
+  $('sign-all').disabled = S.busy || !gs.some((g) => g.ticked && !g.signed);
+  $('download').disabled = S.busy || !S.groups.some((g) => g.signed || g.note.trim());
+}
+
+/* ---------- reading scans (OCR) ---------- */
+let tesseract = null;
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.crossOrigin = 'anonymous'; s.onload = res; s.onerror = () => rej(new Error('Could not load ' + src));
+    document.head.append(s);
+  });
+}
+async function ocrWorker() {
+  if (!tesseract) tesseract = loadScript(TESSERACT).then(() => window.Tesseract.createWorker('eng'));
+  return tesseract;
+}
+let ocrRunning = false;
+async function runOcr() {
+  if (ocrRunning) return;
+  const todo = S.groups.filter((g) => !g.cover && !g.hasText && !candidates(g).length && !g.ocrDone);
+  if (!todo.length) return;
+  ocrRunning = true;
+  todo.forEach((g) => { g.ocrPending = true; updateCard(g); });
+  refresh();
+  let done = 0;
+  try {
+    progress('Reading scanned sheets: 0 of ' + todo.length, 0, todo.length);
+    const worker = await ocrWorker();
+    for (const g of todo) {
+      if (!S.groups.includes(g)) continue;
+      for (let i = g.pages.length - 1; i >= 0 && !candidates(g).length; i--) {
+        const pg = g.pages[i];
+        if (pg.rotate || pg.ocrTried) continue;
+        pg.ocrTried = true;
+        pg.ocr = await ocrPage(worker, pg);
+        if (pg.ocr && !pg.manual) { g.shown = i; }
+      }
+      g.ocrPending = false; g.ocrDone = true;
+      progress('Reading scanned sheets: ' + (++done) + ' of ' + todo.length, done, todo.length);
+      updateCard(g);
+      if (g.vp) renderSheet(g);
+      refresh();
+    }
+  } catch (e) {
+    console.error(e);
+    say('Scanned sheets could not be read automatically. Click on each one where your signature goes.', 'warn');
+  } finally {
+    todo.forEach((g) => { g.ocrPending = false; g.ocrDone = true; updateCard(g); });
+    progress('');
+    ocrRunning = false;
+    refresh();
+  }
+}
+// OCR is sensitive to size and blur on poor scans, so a few settings are tried until one finds the block.
+const OCR_TRIES = [
+  { scale: 3, blur: 0, psm: '3' },      // automatic page layout
+  { scale: 2.5, blur: 1, psm: '11' },   // sparse text: separate words in table cells
+  { scale: 3, blur: 1.5, psm: '11' },
+];
+async function ocrPage(worker, pg) {
+  const page = await pg.file.pdf.getPage(pg.index + 1);
+  pg.ocrLog = [];
+  for (const t of OCR_TRIES) {
+    const vp = page.getViewport({ scale: t.scale });
+    const full = document.createElement('canvas');
+    full.width = Math.round(vp.width); full.height = Math.round(vp.height);
+    const fctx = full.getContext('2d');
+    fctx.fillStyle = '#fff'; fctx.fillRect(0, 0, full.width, full.height);
+    await page.render({ canvasContext: fctx, canvas: full, viewport: vp }).promise;
+    const top = Math.round(full.height * (1 - OCR_PART));
+    const crop = document.createElement('canvas');
+    crop.width = full.width; crop.height = full.height - top;
+    const cctx = crop.getContext('2d');
+    cctx.fillStyle = '#fff'; cctx.fillRect(0, 0, crop.width, crop.height);
+    if (t.blur) cctx.filter = 'blur(' + t.blur + 'px)';
+    cctx.drawImage(full, 0, top, full.width, crop.height, 0, 0, full.width, crop.height);
+    await worker.setParameters({ tessedit_pageseg_mode: t.psm });
+    const { data } = await worker.recognize(crop, {}, { blocks: true });
+    const words = [];
+    for (const b of data.blocks || []) for (const p of b.paragraphs) for (const l of p.lines) for (const w of l.words) words.push(w);
+    const items = SignCore.ocrItems(words, pg.box, t.scale, top);
+    const block = SignCore.findClientBlock(items, pg.box, findOpts);
+    pg.ocrLog.push({ try: t, words: items.length, found: !!block }); // for checking what the scan gave
+    if (block) return block.sigFilled ? null : block;
+  }
+  return null;
+}
+
+refresh();
+window.__signer = S; // for the browser test
+</script>
+</body>
+</html>
