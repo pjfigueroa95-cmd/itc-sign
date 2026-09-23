@@ -35,6 +35,10 @@
   .pad-wrap { position: relative; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
   .pad-wrap::after { content: ""; position: absolute; left: 6%; right: 6%; bottom: 26%; border-bottom: 1px dashed #b9c0cd; pointer-events: none; }
   #pad { display: block; width: 100%; aspect-ratio: 3 / 1; touch-action: none; cursor: crosshair; }
+  .pad-wrap.clean { background: repeating-conic-gradient(#e3e6eb 0 25%, #fff 0 50%) 0 0 / 14px 14px; }
+  .adjust { margin-top: 10px; }
+  .adjust input[type=range] { width: 100%; margin: 4px 0 0; }
+  .adjust .ends { display: flex; justify-content: space-between; color: var(--muted); font-size: .8rem; }
   .pad-empty { position: absolute; inset: 0; display: grid; place-items: center; color: #9aa1ae; pointer-events: none; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
   .btn { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
@@ -128,6 +132,11 @@
         <button class="btn" id="pad-clear" type="button">Clear</button>
         <button class="btn" id="pad-upload" type="button">Upload image</button>
         <input type="file" id="pad-file" accept="image/*" class="hidden">
+      </div>
+      <div class="adjust hidden" id="adjust">
+        <label class="muted" for="pad-adjust">Background clean-up</label>
+        <input type="range" id="pad-adjust" min="-60" max="60" step="2" value="0">
+        <div class="ends"><span>Keep fainter ink</span><span>Remove more background</span></div>
       </div>
       <label class="check" style="margin-top:10px"><input type="checkbox" id="remember"> Remember on this computer</label>
     </section>
@@ -230,12 +239,14 @@ for (const id of ['name', 'date']) $(id).addEventListener('input', () => {
 /* ---------- signature pad ---------- */
 const pad = $('pad'), pctx = pad.getContext('2d');
 let drawing = null, padDirty = false;
+let upload = null, uploadBlank = false; // the uploaded photo, evened out, while its clean-up can still be adjusted
 function padPoint(e) {
   const r = pad.getBoundingClientRect();
   return { x: (e.clientX - r.left) * pad.width / r.width, y: (e.clientY - r.top) * pad.height / r.height };
 }
 pad.addEventListener('pointerdown', (e) => {
   pad.setPointerCapture(e.pointerId);
+  if (upload) endUpload(); // drawing over an upload keeps it as it is now
   drawing = [padPoint(e)];
   pctx.lineCap = pctx.lineJoin = 'round';
   pctx.strokeStyle = '#14205a';
@@ -261,6 +272,7 @@ pad.addEventListener('pointercancel', endStroke);
 $('pad-clear').addEventListener('click', () => {
   pctx.clearRect(0, 0, pad.width, pad.height);
   $('pad-empty').classList.remove('hidden');
+  endUpload();
   S.sig = null; padDirty = false;
   store(null);
   unsignAll('Signature cleared. Sign again once you have a new one.');
@@ -270,25 +282,62 @@ $('pad-file').addEventListener('change', async () => {
   const f = $('pad-file').files[0];
   $('pad-file').value = '';
   if (!f) return;
-  try {
-    const img = await loadImage(URL.createObjectURL(f));
-    const c = document.createElement('canvas');
-    const k = Math.min(1, 1600 / img.naturalWidth);
-    c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
-    const cx = c.getContext('2d');
-    cx.drawImage(img, 0, 0, c.width, c.height);
-    const data = cx.getImageData(0, 0, c.width, c.height);
-    SignCore.whiteToAlpha(data.data);
-    cx.putImageData(data, 0, 0);
-    const box = SignCore.trimBox(data.data, c.width, c.height, 2);
-    if (!box) { say('That image looks blank. Try a darker signature on white paper.', 'warn'); return; }
-    drawOnPad(c, box);
-    padDirty = true;
-    await exportSignature();
-  } catch (e) {
-    say('That image could not be read.', 'warn');
-  }
+  let c;
+  try { c = await uprightImage(f); } catch (e) { say('That image could not be read.', 'warn'); return; }
+  const px = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+  const r = SignCore.cleanSignature(px.data, c.width, c.height, 0);
+  upload = { w: c.width, h: c.height, norm: r.norm };
+  $('pad-adjust').value = 0;
+  $('adjust').classList.remove('hidden');
+  $('pad').parentElement.classList.add('clean');
+  await showUpload(r);
 });
+// Clean-up slider: redraws as it moves, updates the signature when let go.
+$('pad-adjust').addEventListener('input', () => {
+  if (upload) showUpload(SignCore.cleanSignature(null, upload.w, upload.h, +$('pad-adjust').value, upload.norm), true);
+});
+$('pad-adjust').addEventListener('change', () => { if (upload) exportSignature(); });
+async function showUpload(r, previewOnly) {
+  if (!r.box) {
+    pctx.clearRect(0, 0, pad.width, pad.height);
+    $('pad-empty').classList.remove('hidden');
+    say('No signature left. Slide Background clean-up to the left, or try a darker photo.', 'warn');
+    uploadBlank = true;
+  } else {
+    const c = document.createElement('canvas');
+    c.width = upload.w; c.height = upload.h;
+    c.getContext('2d').putImageData(new ImageData(r.data, upload.w, upload.h), 0, 0);
+    drawOnPad(c, r.box);
+    if (uploadBlank) { say(''); uploadBlank = false; }
+  }
+  padDirty = true;
+  if (!previewOnly) await exportSignature();
+}
+function endUpload() {
+  upload = null;
+  $('adjust').classList.add('hidden');
+  $('pad').parentElement.classList.remove('clean');
+}
+// The photo turned upright (from its EXIF orientation) and scaled down to about 1200 px wide.
+async function uprightImage(file) {
+  const info = SignCore.jpegInfo(new Uint8Array(await file.slice(0, 256 * 1024).arrayBuffer()));
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  // Browsers normally turn the photo upright as they decode it. If this one didn't (a sideways
+  // orientation left the size unswapped), turn it here.
+  let o = 1;
+  if (info.orientation >= 5 && info.width !== info.height && bmp.width === info.width && bmp.height === info.height) o = info.orientation;
+  const t = SignCore.orientTransform(o, bmp.width, bmp.height);
+  const k = Math.min(1, 1200 / t.w);
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(t.w * k)); c.height = Math.max(1, Math.round(t.h * k));
+  const cx = c.getContext('2d');
+  cx.fillStyle = '#fff'; cx.fillRect(0, 0, c.width, c.height);
+  cx.scale(c.width / t.w, c.height / t.h);
+  cx.transform(...t.m);
+  cx.drawImage(bmp, 0, 0);
+  bmp.close();
+  return c;
+}
 function drawOnPad(src, box) {
   pctx.clearRect(0, 0, pad.width, pad.height);
   const k = Math.min((pad.width * 0.9) / box.w, (pad.height * 0.8) / box.h);

@@ -245,14 +245,195 @@ var SignCore = (function () {
     return base.replace(/[\\/:*?"<>|]/g, '_') + ' - signed.pdf';
   }
 
-  // Makes white see-through in RGBA pixels (in place), with a soft edge so strokes stay smooth.
-  function whiteToAlpha(data) {
-    for (var i = 0; i < data.length; i += 4) {
-      var lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      var a = lum >= 235 ? 0 : lum <= 175 ? 255 : Math.round((235 - lum) / 60 * 255);
-      data[i + 3] = Math.min(data[i + 3], a);
+  /* ---------- uploaded signature clean-up (photos or scans of a signature on paper) ---------- */
+
+  // EXIF orientation (1-8, 1 when there is none) of a JPEG, and its stored pixel size (before rotation).
+  function jpegInfo(bytes) {
+    var b = bytes, out = { orientation: 1, width: 0, height: 0 };
+    if (b.length < 4 || b[0] !== 0xFF || b[1] !== 0xD8) return out;
+    var i = 2;
+    while (i + 4 <= b.length) {
+      if (b[i] !== 0xFF) { i++; continue; }
+      var m = b[i + 1];
+      if (m === 0xFF) { i++; continue; }
+      if (m === 0x01 || (m >= 0xD0 && m <= 0xD8)) { i += 2; continue; }
+      if (m === 0xDA || m === 0xD9) break;
+      var len = (b[i + 2] << 8) | b[i + 3];
+      if (m === 0xE1 && b[i + 4] === 0x45 && b[i + 5] === 0x78 && b[i + 6] === 0x69 && b[i + 7] === 0x66) {
+        var o = exifOrientation(b, i + 10, Math.min(b.length, i + 2 + len));
+        if (o) out.orientation = o;
+      }
+      if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC) {
+        out.height = (b[i + 5] << 8) | b[i + 6];
+        out.width = (b[i + 7] << 8) | b[i + 8];
+      }
+      i += 2 + len;
     }
-    return data;
+    return out;
+  }
+  // Orientation tag from a TIFF header starting at t; 0 when missing or unreadable.
+  function exifOrientation(b, t, end) {
+    var le = b[t] === 0x49;
+    function u16(p) { return le ? b[p] | (b[p + 1] << 8) : (b[p] << 8) | b[p + 1]; }
+    function u32(p) { return le ? (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16)) + b[p + 3] * 16777216
+                                : b[p] * 16777216 + ((b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]); }
+    var ifd = t + u32(t + 4);
+    if (ifd + 2 > end) return 0;
+    var n = u16(ifd);
+    for (var k = 0; k < n; k++) {
+      var e = ifd + 2 + k * 12;
+      if (e + 12 > end) return 0;
+      if (u16(e) === 0x0112) { var v = u16(e + 8); return v >= 1 && v <= 8 ? v : 0; }
+    }
+    return 0;
+  }
+
+  // Canvas transform that turns a w x h image with EXIF orientation o upright.
+  // Returns { w, h (upright size), m: [a, b, c, d, e, f] for ctx.transform }.
+  function orientTransform(o, w, h) {
+    switch (o) {
+      case 2: return { w: w, h: h, m: [-1, 0, 0, 1, w, 0] };
+      case 3: return { w: w, h: h, m: [-1, 0, 0, -1, w, h] };
+      case 4: return { w: w, h: h, m: [1, 0, 0, -1, 0, h] };
+      case 5: return { w: h, h: w, m: [0, 1, 1, 0, 0, 0] };
+      case 6: return { w: h, h: w, m: [0, 1, -1, 0, h, 0] };
+      case 7: return { w: h, h: w, m: [0, -1, -1, 0, h, w] };
+      case 8: return { w: h, h: w, m: [0, -1, 1, 0, 0, w] };
+      default: return { w: w, h: h, m: [1, 0, 0, 1, 0, 0] };
+    }
+  }
+
+  // Luminance 0-255 of RGBA pixels, with see-through pixels counted as white paper.
+  function greyscale(rgba) {
+    var n = rgba.length / 4, g = new Uint8Array(n);
+    for (var i = 0; i < n; i++) {
+      var a = rgba[i * 4 + 3] / 255;
+      var l = 0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2];
+      g[i] = Math.round(l * a + 255 * (1 - a));
+    }
+    return g;
+  }
+
+  // Evens out the lighting: estimates the paper brightness everywhere and divides it out, so shadows
+  // and grey paper come out white and the ink keeps its contrast. The estimate is the brightest pixel
+  // per small cell (which drops the ink strokes), widened by a cell, then blurred over a large area.
+  function evenLighting(grey, w, h) {
+    var cell = Math.max(8, Math.round(Math.max(w, h) / 60));
+    var cw = Math.ceil(w / cell), ch = Math.ceil(h / cell), x, y;
+    var mx = new Float32Array(cw * ch);
+    for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
+      var c = ((y / cell) | 0) * cw + ((x / cell) | 0), v = grey[y * w + x];
+      if (v > mx[c]) mx[c] = v;
+    }
+    // Widened so strokes thicker than a cell don't darken the estimate.
+    var wide = new Float32Array(cw * ch);
+    for (var cy = 0; cy < ch; cy++) for (var cx = 0; cx < cw; cx++) {
+      var best = 0;
+      for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) {
+        var yy = cy + dy, xx = cx + dx;
+        if (yy >= 0 && yy < ch && xx >= 0 && xx < cw && mx[yy * cw + xx] > best) best = mx[yy * cw + xx];
+      }
+      wide[cy * cw + cx] = best;
+    }
+    var bg = boxBlur(boxBlur(wide, cw, ch, 2), cw, ch, 2);
+    var out = new Uint8Array(w * h);
+    for (y = 0; y < h; y++) {
+      var fy = Math.min(ch - 1, Math.max(0, (y + 0.5) / cell - 0.5)), y0 = fy | 0, y1 = Math.min(ch - 1, y0 + 1), ty = fy - y0;
+      for (x = 0; x < w; x++) {
+        var fx = Math.min(cw - 1, Math.max(0, (x + 0.5) / cell - 0.5)), x0 = fx | 0, x1 = Math.min(cw - 1, x0 + 1), tx = fx - x0;
+        var b = (bg[y0 * cw + x0] * (1 - tx) + bg[y0 * cw + x1] * tx) * (1 - ty) +
+                (bg[y1 * cw + x0] * (1 - tx) + bg[y1 * cw + x1] * tx) * ty;
+        out[y * w + x] = Math.min(255, Math.round(grey[y * w + x] * 255 / Math.max(b, 1)));
+      }
+    }
+    return out;
+  }
+  function boxBlur(src, w, h, r) {
+    var tmp = new Float32Array(w * h), out = new Float32Array(w * h), x, y, k, s, n;
+    for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
+      s = 0; n = 0;
+      for (k = -r; k <= r; k++) if (x + k >= 0 && x + k < w) { s += src[y * w + x + k]; n++; }
+      tmp[y * w + x] = s / n;
+    }
+    for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
+      s = 0; n = 0;
+      for (k = -r; k <= r; k++) if (y + k >= 0 && y + k < h) { s += tmp[(y + k) * w + x]; n++; }
+      out[y * w + x] = s / n;
+    }
+    return out;
+  }
+
+  // Otsu's threshold for 0-255 values: values below it are one class (ink), the rest the other (paper).
+  function otsuThreshold(values) {
+    var hist = new Float64Array(256), n = values.length, i;
+    for (i = 0; i < n; i++) hist[values[i]]++;
+    var sum = 0;
+    for (i = 0; i < 256; i++) sum += i * hist[i];
+    var sumB = 0, wB = 0, best = -1, t = 128;
+    for (i = 0; i < 256; i++) {
+      wB += hist[i];
+      if (!wB) continue;
+      var wF = n - wB;
+      if (!wF) break;
+      sumB += i * hist[i];
+      var mB = sumB / wB, mF = (sum - sumB) / wF, between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > best) { best = between; t = i + 1; }
+    }
+    return t;
+  }
+
+  var INK = [20, 32, 90]; // same blue-black as the drawing pen
+
+  // Turns evened-out grey values into the signature image: values at or above threshold are see-through,
+  // darker ones are solid ink colour with an alpha by how dark they are, so edges stay smooth. Specks
+  // (tiny blobs) are removed. Returns { data (RGBA), box (the ink plus a margin; null when blank) }.
+  function inkImage(norm, w, h, threshold, color) {
+    color = color || INK;
+    var n = w * h, alpha = new Uint8Array(n), i, inkSum = 0, inkN = 0;
+    for (i = 0; i < n; i++) if (norm[i] < threshold) { inkSum += norm[i]; inkN++; }
+    var ramp = Math.max(24, (threshold - (inkN ? inkSum / inkN : 0)) * 0.8);
+    for (i = 0; i < n; i++) {
+      var d = threshold - norm[i];
+      if (d > 0) alpha[i] = Math.round(255 * Math.min(1, 0.2 + d / ramp));
+    }
+    removeSpecks(alpha, w, h, Math.max(6, Math.round(n / 60000)));
+    var data = new Uint8ClampedArray(n * 4);
+    for (i = 0; i < n; i++) {
+      if (!alpha[i]) continue;
+      data[i * 4] = color[0]; data[i * 4 + 1] = color[1]; data[i * 4 + 2] = color[2]; data[i * 4 + 3] = alpha[i];
+    }
+    var pad = Math.max(4, Math.round(Math.max(w, h) / 100));
+    return { data: data, box: trimBox(data, w, h, pad) };
+  }
+
+  // Clears blobs of ink (8-connected) smaller than minArea pixels, in place.
+  function removeSpecks(alpha, w, h, minArea) {
+    var seen = new Uint8Array(w * h), stack = new Int32Array(w * h), blob = [];
+    for (var s = 0; s < w * h; s++) {
+      if (!alpha[s] || seen[s]) continue;
+      var top = 0; stack[top++] = s; seen[s] = 1; blob.length = 0;
+      while (top) {
+        var p = stack[--top], px = p % w, py = (p - px) / w;
+        blob.push(p);
+        for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) {
+          var x = px + dx, y = py + dy, q = y * w + x;
+          if (x < 0 || y < 0 || x >= w || y >= h || seen[q] || !alpha[q]) continue;
+          seen[q] = 1; stack[top++] = q;
+        }
+      }
+      if (blob.length < minArea) for (var k = 0; k < blob.length; k++) alpha[blob[k]] = 0;
+    }
+  }
+
+  // The whole clean-up for RGBA pixels (already upright and scaled down). adjust moves the threshold
+  // from the automatic one: positive removes more background, negative keeps fainter ink.
+  // Returns { data, box, threshold, auto, norm }; pass norm back as prepared to skip the slow steps.
+  function cleanSignature(rgba, w, h, adjust, prepared) {
+    var norm = prepared || evenLighting(greyscale(rgba), w, h);
+    var auto = Math.min(235, Math.max(60, otsuThreshold(norm)));
+    var threshold = Math.min(250, Math.max(20, auto - (adjust || 0)));
+    var r = inkImage(norm, w, h, threshold);
+    return { data: r.data, box: r.box, threshold: threshold, auto: auto, norm: norm };
   }
 
   // Smallest box around the non-transparent pixels, plus pad; null when there are none.
@@ -344,7 +525,9 @@ var SignCore = (function () {
            textItems: textItems, buildLines: buildLines, findClientBlock: findClientBlock, placement: placement,
            fitImage: fitImage, stampPdf: stampPdf, isSigned: isSigned, plainText: plainText,
            leaveOutReason: leaveOutReason, parseQcms: parseQcms, hintPlacement: hintPlacement, ocrItems: ocrItems,
-           groupPages: groupPages, outputName: outputName, whiteToAlpha: whiteToAlpha, trimBox: trimBox,
+           groupPages: groupPages, outputName: outputName, trimBox: trimBox,
+           jpegInfo: jpegInfo, orientTransform: orientTransform, greyscale: greyscale, evenLighting: evenLighting, otsuThreshold: otsuThreshold,
+           inkImage: inkImage, removeSpecks: removeSpecks, cleanSignature: cleanSignature,
            setOutline: setOutline, combinePdfs: combinePdfs, addNotesPage: addNotesPage };
 })();
 if (typeof module !== 'undefined') module.exports = SignCore;
