@@ -276,17 +276,20 @@ var SignCore = (function () {
   /* ---------- sheets with no client block: an added "Reviewed by Client" stamp ---------- */
 
   var STAMP = { w: 190, h: 64, label: 'Reviewed by Client' };
+  // tried when the full-size stamp doesn't fit on a busy page
+  var STAMP_SMALL = { w: 150, h: 48 };
 
   // What to draw for an added client sign-off whose frame's bottom-left corner is at (x, y):
   // a thin frame, the label, the signature, then name and date on one line.
+  // at may carry its own size {w, h} (a smaller stamp from emptySpot); everything inside scales with it.
   function stampPlacement(at, box, name, date) {
-    var w = STAMP.w, h = STAMP.h;
+    var w = at.w || STAMP.w, h = at.h || STAMP.h, k = h / STAMP.h;
     var x = Math.max(box.x0 + 4, Math.min(box.x1 - w - 4, at.x));
     var y = Math.max(box.y0 + 4, Math.min(box.y1 - h - 4, at.y));
-    var texts = [{ str: STAMP.label, x: x + 5, y: y + h - 11, size: 7.5, bold: true }];
-    if (name) texts.push({ str: 'Name: ' + name, x: x + 5, y: y + 6, size: 7 });
-    if (date) texts.push({ str: 'Date: ' + date, x: x + w - 62, y: y + 6, size: 7 });
-    return { sig: { x: x + 6, y: y + 16, h: 30, maxW: w - 12 }, texts: texts, frame: { x: x, y: y, w: w, h: h } };
+    var texts = [{ str: STAMP.label, x: x + 5 * k, y: y + h - 11 * k, size: 7.5 * k, bold: true }];
+    if (name) texts.push({ str: 'Name: ' + name, x: x + 5 * k, y: y + 6 * k, size: 7 * k });
+    if (date) texts.push({ str: 'Date: ' + date, x: x + w - 62 * k, y: y + 6 * k, size: 7 * k });
+    return { sig: { x: x + 6 * k, y: y + 16 * k, h: 30 * k, maxW: w - 12 * k }, texts: texts, frame: { x: x, y: y, w: w, h: h } };
   }
 
   // Luminance per pixel (0-255) of RGBA data, with transparent pixels as white.
@@ -297,7 +300,8 @@ var SignCore = (function () {
 
   // Finds empty space for the stamp near the bottom of the page, above the footer.
   // rgba: the page rendered at `scale` pixels per point (w x h pixels). items: its text items (for the footer).
-  // Returns the frame's bottom-left corner in PDF units, or null when no empty space is big enough.
+  // Returns the frame's bottom-left corner and size {x, y, w, h} in PDF units: full size if it fits anywhere,
+  // else the smaller stamp; null when neither fits.
   // Prefers the lowest spot, then the one furthest right (where client sign-offs usually sit).
   function emptySpot(rgba, w, h, scale, box, items) {
     var H = box.y1 - box.y0;
@@ -317,20 +321,27 @@ var SignCore = (function () {
     function dark(x0, y0, x1, y1) { // pixel rect, inclusive-exclusive
       return sat[y1 * (w + 1) + x1] - sat[y0 * (w + 1) + x1] - sat[y1 * (w + 1) + x0] + sat[y0 * (w + 1) + x0];
     }
-    var pad = 6, sw = STAMP.w + 2 * pad, sh = STAMP.h + 2 * pad;
-    var pw = Math.ceil(sw * scale), ph = Math.ceil(sh * scale);
-    var step = 4;
-    // from the floor up to 60% of the way up the page
-    for (var by = floor; by < box.y0 + H * 0.6; by += step) {
-      var py1 = Math.round((box.y1 - (by - pad)) * scale), py0 = py1 - ph;
-      if (py0 < 0 || py1 > h) continue;
-      for (var bx = box.x1 - 24 - sw; bx >= box.x0 + 24; bx -= step * 2) {
-        var px0 = Math.round((bx - box.x0) * scale), px1 = px0 + pw;
-        if (px0 < 0 || px1 > w) continue;
-        if (dark(px0, py0, px1, py1) === 0) return { x: bx + pad, y: by };
+    function search(size, pad) {
+      var sw = size.w + 2 * pad, sh = size.h + 2 * pad;
+      var pw = Math.ceil(sw * scale), ph = Math.ceil(sh * scale);
+      var step = 4, mx0 = Math.round(18 * scale), mx1 = w - Math.round(18 * scale);
+      // from the floor up to 40% of the way up the page ("near the bottom")
+      for (var by = floor; by < box.y0 + H * 0.4; by += step) {
+        var py1 = Math.round((box.y1 - (by - pad)) * scale), py0 = py1 - ph;
+        if (py0 < 0 || py1 > h) continue;
+        for (var bx = box.x1 - 24 - sw; bx >= box.x0 + 24; bx -= step * 2) {
+          var px0 = Math.round((bx - box.x0) * scale), px1 = px0 + pw;
+          if (px0 < 0 || px1 > w) continue;
+          if (dark(px0, py0, px1, py1) !== 0) continue;
+          // an empty table cell is a field on the form, not free space: skip spots with something beside them on
+          // both sides (out to the page margins); real free space near the bottom of a form is open on one side
+          var enclosed = dark(Math.min(mx0, px0), py0, px0, py1) > 0 && dark(px1, py0, Math.max(mx1, px1), py1) > 0;
+          if (!enclosed) return { x: bx + pad, y: by, w: size.w, h: size.h };
+        }
       }
+      return null;
     }
-    return null;
+    return search(STAMP, 6) || search(STAMP_SMALL, 3);
   }
 
   // Ink or an image in a signature area, e.g. a signature added in another PDF editor.
