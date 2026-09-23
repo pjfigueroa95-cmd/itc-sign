@@ -471,23 +471,87 @@ async function analyse(file) {
       const v = page.view;
       const box = { x0: v[0], y0: v[1], x1: v[2], y1: v[3] };
       const items = SignCore.textItems(await page.getTextContent());
-      const pg = { file, index: i, box, rotate: page.rotate, hasText: items.some((t) => t.str.trim()) };
-      const block = SignCore.findClientBlock(items, box, findOpts);
-      if (block && block.sigFilled) pg.sigFilled = true; else pg.block = block;
+      const pg = { file, index: i, box, rotate: page.rotate, hasText: items.some((t) => t.str.trim()), items };
       const hint = qcms && qcms.pages[i];
-      if (!pg.block && !pg.sigFilled && hint && hint.client) pg.hint = hint;
+      // what the sender says about this form's client sign-off: block | optional_stamp | none
+      pg.signoff = (hint && hint.client_signoff) || null;
+      if (pg.signoff !== 'none') {
+        pg.block = SignCore.findClientBlock(items, box, findOpts);
+        if (pg.block) pg.already = pg.block.already || (await inkInArea(page, pg.block, items, pg));
+        else if (hint && hint.client) pg.hint = hint;
+      }
       file.pages.push(pg);
       page.cleanup();
     }
     file.marks = await bookmarks(pdf);
     file.hasText = file.pages.some((p) => p.hasText);
     file.hasBlock = file.pages.some((p) => p.block || p.hint);
+    // a loose sheet whose every client block is signed already is left out; in a pack only its sheet is
+    const blocks = file.pages.filter((p) => p.block || p.hint);
+    const already = !qcms && blocks.length > 0 && blocks.every((p) => p.already);
     // "text but no block" only when every page has text: a scanned page may still hold a block
     const allText = file.pages.every((p) => p.hasText);
-    file.reason = SignCore.leaveOutReason({ path: file.path, signed: file.signed, hasText: allText, hasBlock: file.hasBlock });
+    file.reason = SignCore.leaveOutReason({ path: file.path, signed: file.signed, already, hasText: allText, hasBlock: file.hasBlock });
   } catch (e) {
     file.reason = e && e.name === 'PasswordException' ? 'Password protected' : 'Could not be opened as a PDF';
   }
+}
+
+// A signature already in the client box (ink, or an image added in another PDF editor), or null.
+// Renders just that area; the words printed there and ruled lines are ignored. Also keeps the signature
+// inside the client's cell when a cell border is found to the right of it.
+const INK_SCALE = 2;
+// [x0, y0, x1, y1] in PDF units -> the same rectangle in viewport pixels (pdf.js 6 has no convertToViewportRectangle)
+function viewRect(vp, r) {
+  const a = vp.convertToViewportPoint(r[0], r[1]), b = vp.convertToViewportPoint(r[2], r[3]);
+  return [a[0], a[1], b[0], b[1]];
+}
+async function inkInArea(page, block, items, pg) {
+  const area = block.area;
+  if (!area || area.x1 - area.x0 < 4 || area.y1 - area.y0 < 4) return null;
+  try {
+    const vp = page.getViewport({ scale: INK_SCALE });
+    const r = viewRect(vp, [area.x0, area.y0, area.x1, area.y1]);
+    const left = Math.min(r[0], r[2]), top = Math.min(r[1], r[3]);
+    const w = Math.max(1, Math.round(Math.abs(r[2] - r[0]))), h = Math.max(1, Math.round(Math.abs(r[3] - r[1])));
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+    await page.render({ canvasContext: ctx, canvas: c, viewport: vp, transform: [1, 0, 0, 1, -left, -top] }).promise;
+    const skip = items.filter((t) => t.str.trim()).map((t) => {
+      const q = viewRect(vp, [t.x, t.y - t.h * 0.3, t.x + t.w, t.y + t.h]);
+      return { x0: Math.min(q[0], q[2]) - left - 2, y0: Math.min(q[1], q[3]) - top - 2, x1: Math.max(q[0], q[2]) - left + 2, y1: Math.max(q[1], q[3]) - top + 2 };
+    });
+    const data = ctx.getImageData(0, 0, w, h).data;
+    // a cell border just right of where the column starts (a narrow label cell): move the column past it
+    let from = 0;
+    const first = SignCore.rightBorder(data, w, h, 0);
+    if (block.kind === 'labelled' && first != null && first <= (block.sig.x - area.x0 + 14) * INK_SCALE) {
+      const shift = area.x0 + first / INK_SCALE + 5 - block.sig.x;
+      if (shift > 0) {
+        block.sig.x += shift; block.sig.maxW -= shift;
+        for (const k of ['name', 'date']) if (block[k]) block[k].x += shift;
+      }
+      from = first + 2;
+    }
+    const edge = SignCore.rightBorder(data, w, h, Math.max(from, Math.round((block.sig.x - area.x0 + 30) * INK_SCALE)));
+    if (edge != null) block.sig.maxW = Math.max(40, Math.min(block.sig.maxW, area.x0 + edge / INK_SCALE - block.sig.x - 4));
+    // boxed: keep the signature above the ruled line at the top of the Date row
+    if (block.kind === 'boxed') {
+      const row = SignCore.bottomBorder(data, w, h);
+      if (row != null) {
+        const lineY = area.y1 - row / INK_SCALE;
+        if (lineY + 2 > block.sig.y) {
+          block.sig.h = Math.max(12, Math.min(block.sig.h, area.y1 - lineY - 4));
+          block.sig.y = lineY + 2;
+        }
+      }
+    }
+    const ink = SignCore.inkInBox(data, w, h, skip);
+    if (pg) pg.ink = { count: ink.count, ratio: ink.ratio, w, h, first, edge }; // for checking what was measured
+    return ink.inked ? 'There is already a signature in the client box' : null;
+  } catch (e) { if (pg) pg.ink = { error: String(e && e.message || e) }; return null; }
 }
 
 async function bookmarks(pdf) {
@@ -514,7 +578,11 @@ function rebuild() {
       const group = { id: S.groups.length, file: f, title: g.title, cover: !!g.cover, pages, signed: false, note: '', zoom: true };
       group.hasText = pages.some((p) => p.hasText);
       group.shown = pages.indexOf(pages.find((p) => place(p)) || pages[pages.length - 1]);
-      group.ticked = !group.cover && (candidates(group).length > 0 || !group.hasText);
+      // ticked to start with: sheets ready to sign, and scans (to be read or clicked). Not sheets signed
+      // already or with only an optional client position, unless their file was ticked back in.
+      const st = state(group);
+      group.ticked = !group.cover && (st === 'ready' || st === 'click' || st === 'reading' ||
+        (!!f.forced && (st === 'already' || st === 'optional')));
       group.collapsed = group.cover && !candidates(group).length;
       S.groups.push(group);
     }
@@ -552,6 +620,7 @@ function renderLeftOut() {
           f.reason = reason;
         }
         f.include = cb.checked;
+        f.forced = cb.checked; // ticked back in: its sheets start ticked, even ones signed already
         const done = S.groups.filter((g) => g.signed || g.note).map((g) => g.file.id + '|' + g.title);
         rebuild();
         if (done.length) say('Files changed: check the ticks and sign again where needed.', 'warn');
@@ -570,6 +639,7 @@ function renderLeftOut() {
 function candidates(g) { return g.pages.filter((p) => place(p)); }
 
 function method(pg) {
+  if (pg.stamp) return pg.stamp.clicked ? 'stampClick' : 'stamp';
   if (pg.manual) return pg.copied ? 'copied' : 'click';
   if (pg.block) return 'text';
   if (pg.hint) return 'hint';
@@ -582,12 +652,14 @@ const METHOD = {
   ocr: ['Read from scan', 'ok', 'Found by reading the scanned sheet.'],
   click: ['Placed by you', 'info', 'Placed where you clicked.'],
   copied: ['Placed by you', 'info', 'Copied from where you clicked on another sheet.'],
+  stamp: ['Sign-off added', 'info', 'Client sign-off added in empty space near the bottom.'],
+  stampClick: ['Sign-off added', 'info', 'Client sign-off added where you clicked.'],
 };
 
 // What to draw on a page, or null.
 function place(pg) {
-  if (pg.sigFilled && !pg.manual) return null;
   const name = nameText(), date = dateText();
+  if (pg.stamp) return SignCore.stampPlacement(pg.stamp, pg.box, name, date);
   if (pg.manual) return SignCore.placement({ box: pg.box, auto: pg.block || pg.ocr, manual: pg.manual }, name, date);
   if (pg.block) return SignCore.placement({ box: pg.box, auto: pg.block }, name, date);
   if (pg.hint) return SignCore.hintPlacement(pg.hint, pg.box, name, date);
@@ -595,8 +667,16 @@ function place(pg) {
   return null;
 }
 
+// A page placed by the client (click or added sign-off) is always meant to be signed.
+const byClient = (p) => p.manual || p.stamp;
 function state(g) {
-  if (candidates(g).length) return 'ready';
+  const c = candidates(g);
+  if (c.length) {
+    if (c.some(byClient)) return 'ready';
+    if (c.every((p) => p.already)) return 'already';
+    if (c.every((p) => (p.block || p.ocr || {}).optional)) return 'optional';
+    return 'ready';
+  }
   if (g.ocrPending) return 'reading';
   if (g.cover) return 'cover';
   if (!g.hasText) return 'click';
@@ -631,6 +711,7 @@ function renderCards() {
     q('.tick').setAttribute('aria-label', 'Tick to sign ' + g.title);
     q('.tick').addEventListener('change', () => {
       g.ticked = q('.tick').checked;
+      g.touched = true;
       if (!g.ticked) g.signed = false;
       updateCard(g); refresh();
       if (!g.ticked) q('.note').focus();
@@ -661,26 +742,43 @@ function updateCard(g) {
   let label, kind;
   if (g.signed) [label, kind] = ['Signed', 'ok'];
   else if (st === 'ready') [label, kind] = METHOD[method(candidates(g)[0])];
+  else if (st === 'already') [label, kind] = ['Already signed', ''];
+  else if (st === 'optional') [label, kind] = ['Optional', 'info'];
   else if (st === 'reading') [label, kind] = ['Reading scan…', 'info'];
   else if (st === 'click') [label, kind] = ['Click to place', 'warn'];
   else if (st === 'cover') [label, kind] = ['Cover page', ''];
-  else [label, kind] = ['No sign-off block', ''];
+  else [label, kind] = ['No client sign-off block', ''];
   badge.textContent = label;
   badge.className = 'badge ' + kind;
   const how = q('.how');
   how.textContent = '';
-  if (m) {
+  const button = (text, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = text;
+    b.addEventListener('click', fn);
+    how.append(b);
+  };
+  if (st === 'already' && pg.already) {
+    how.textContent = pg.already + (g.ticked ? '. Ticked, so it will be signed again. ' : '. Tick it to sign it anyway. ');
+  } else if (st === 'optional' && place(pg)) {
+    const head = (pg.block || pg.ocr).heading;
+    how.textContent = 'Optional client position ("' + head.replace(/\b\w/g, (c) => c.toUpperCase()) + '"). ' +
+      (g.ticked ? 'Ticked, so it will be signed. ' : 'Tick it if you need to sign here. ');
+  } else if (m) {
     how.textContent = METHOD[m][2] + ' Click on the sheet to move it. ';
-    if (pg.manual) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = pg.block || pg.hint || pg.ocr ? 'Put it back' : 'Remove';
-      b.addEventListener('click', () => { pg.manual = null; pg.copied = false; afterPlace(g); renderSheet(g); });
-      how.append(b);
+    if (pg.stamp) button('Remove', () => { pg.stamp = null; afterPlace(g); renderSheet(g); });
+    else if (pg.manual) {
+      button(pg.block || pg.hint || pg.ocr ? 'Put it back' : 'Remove', () => { pg.manual = null; pg.copied = false; afterPlace(g); renderSheet(g); });
     }
-  } else if (st === 'click' || st === 'reading') how.textContent = 'Click on the sheet where your signature goes.';
+  } else if (pg.stampWait) how.textContent = 'No empty space found. Click on the sheet where the client sign-off should go.';
+  else if (st === 'click' || st === 'reading') how.textContent = 'Click on the sheet where your signature goes.';
   else if (candidates(g).length) how.textContent = 'Nothing to sign on this page. Signature is on page ' + (g.pages.indexOf(candidates(g)[0]) + 1) + '.';
-  else how.textContent = 'No client sign-off block found. Tick it and click on the sheet if it does need signing.';
+  else if (st === 'cover') how.textContent = '';
+  else if (g.pages.some((p) => p.signoff === 'none')) how.textContent = 'This sheet has no client sign-off.';
+  else {
+    how.textContent = 'This sheet has no client sign-off block, so it is left unsigned. ';
+    button('Add client sign-off', () => addSignoff(g));
+  }
   q('.sheet').classList.toggle('hidden', !!g.collapsed);
   const zb = q('.zoom');
   zb.textContent = g.collapsed ? 'Show sheet' : g.zoom ? 'Whole sheet' : 'Zoom to signature';
@@ -742,6 +840,11 @@ function drawOverlay(g) {
   const pg = g.pages[g.shown], pl = place(pg);
   if (!pl) return;
   ctx.globalAlpha = g.signed ? 1 : g.ticked ? 0.55 : 0.25;
+  if (pl.frame) {
+    const f = pl.frame, a = vp.convertToViewportPoint(f.x, f.y), b = vp.convertToViewportPoint(f.x + f.w, f.y + f.h);
+    ctx.setLineDash([]); ctx.strokeStyle = '#14205a'; ctx.lineWidth = Math.max(1, 0.6 * vp.scale);
+    ctx.strokeRect(Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+  }
   const r = S.sig ? SignCore.fitImage(pl.sig, S.sig.aspect)
     : { x: pl.sig.x, y: pl.sig.y, w: Math.min(pl.sig.maxW, pl.sig.h * 3.5), h: pl.sig.h };
   const a = vp.convertToViewportPoint(r.x, r.y), b = vp.convertToViewportPoint(r.x + r.w, r.y + r.h);
@@ -756,7 +859,7 @@ function drawOverlay(g) {
   ctx.fillStyle = '#14205a';
   for (const t of pl.texts) {
     const p = vp.convertToViewportPoint(t.x, t.y);
-    ctx.font = (t.size * vp.scale) + 'px Helvetica, Arial, sans-serif';
+    ctx.font = (t.bold ? 'bold ' : '') + (t.size * vp.scale) + 'px Helvetica, Arial, sans-serif';
     ctx.fillText(t.str, p[0], p[1]);
   }
   ctx.globalAlpha = 1;
@@ -770,6 +873,17 @@ function clickPlace(g, e) {
   const [x, y] = g.vp.convertToPdfPoint((e.clientX - r.left) * ov.width / r.width, (e.clientY - r.top) * ov.height / r.height);
   const pg = g.pages[g.shown];
   const needed = !candidates(g).length;
+  // A sheet with text but no client block gets a labelled client sign-off where the client clicks.
+  if (pg.stamp || pg.stampWait || (needed && pg.hasText)) {
+    const S2 = SignCore.STAMP;
+    pg.stamp = { x: x - S2.w / 2, y: y - S2.h / 2, clicked: true };
+    pg.stampWait = false;
+    g.ticked = true;
+    g.el.querySelector('.tick').checked = true;
+    afterPlace(g);
+    renderSheet(g);
+    return;
+  }
   pg.manual = { x, y }; pg.copied = false;
   g.ticked = true;
   g.el.querySelector('.tick').checked = true;
@@ -788,6 +902,27 @@ function clickPlace(g, e) {
   }
   afterPlace(g);
   if (needed) renderSheet(g); // zoom in on the new spot
+}
+// "Add client sign-off" on a sheet with no client block: a small "Reviewed by Client" block in the best
+// empty space near the bottom of the page on show, above the footer (or where the client then clicks).
+async function addSignoff(g) {
+  const pg = g.pages[g.shown];
+  try {
+    const page = await pg.file.pdf.getPage(pg.index + 1);
+    const vp = page.getViewport({ scale: 1, rotation: 0 });
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, canvas: c, viewport: vp }).promise;
+    const spot = SignCore.emptySpot(ctx.getImageData(0, 0, c.width, c.height).data, c.width, c.height, 1, pg.box, pg.items);
+    if (spot) { pg.stamp = spot; pg.stampWait = false; } else pg.stampWait = true;
+  } catch (e) { pg.stampWait = true; }
+  g.ticked = true;
+  g.el.querySelector('.tick').checked = true;
+  g.zoom = !pg.stampWait;
+  afterPlace(g);
+  renderSheet(g);
 }
 function afterPlace(g) {
   if (!candidates(g).length) g.signed = false;
@@ -923,9 +1058,12 @@ async function runOcr() {
         if (pg.rotate || pg.ocrTried) continue;
         pg.ocrTried = true;
         pg.ocr = await ocrPage(worker, pg);
+        if (pg.ocr && pg.ocr.already) pg.already = pg.ocr.already;
         if (pg.ocr && !pg.manual) { g.shown = i; }
       }
       g.ocrPending = false; g.ocrDone = true;
+      // read as signed already, or only an optional position: unticked, unless the client ticked it
+      if (!g.touched && !g.file.forced && (state(g) === 'already' || state(g) === 'optional')) { g.ticked = false; g.el.querySelector('.tick').checked = false; }
       progress('Reading scanned sheets: ' + (++done) + ' of ' + todo.length, done, todo.length);
       updateCard(g);
       if (g.vp) renderSheet(g);
@@ -971,7 +1109,7 @@ async function ocrPage(worker, pg) {
     const items = SignCore.ocrItems(words, pg.box, t.scale, top);
     const block = SignCore.findClientBlock(items, pg.box, findOpts);
     pg.ocrLog.push({ try: t, words: items.length, found: !!block }); // for checking what the scan gave
-    if (block) return block.sigFilled ? null : block;
+    if (block) return block;
   }
   return null;
 }

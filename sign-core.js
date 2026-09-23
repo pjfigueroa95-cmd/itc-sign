@@ -2,18 +2,27 @@ var SignCore = (function () {
   var DEFAULTS = {
     headings: ['client representative', "client's representative", 'principal representative',
                "principal's representative", 'owner representative', "owner's representative",
-               'superintendent', 'client approval', 'client'],
+               'superintendent', 'client approval', 'reviewed by client', 'accepted for client',
+               'client witness', 'client'],
+    // tried only when no heading above is found; a block found this way is optional (left unticked)
+    fallback: ['test witnessed by'],
+    // headings that can be signed on their own line, e.g. "TEST WITNESSED BY: ________  OF: ______"
+    inline: ['test witnessed by', 'client witness'],
     labels: { signature: ['signature', 'signed', 'sign'], name: ['name', 'print name'],
               company: ['company', 'organisation', 'organization'], date: ['date'] }
   };
   function opts(o) {
     o = o || {};
     return { headings: (o.headings || DEFAULTS.headings).map(norm),
+             fallback: (o.fallback || DEFAULTS.fallback).map(norm),
+             inline: (o.inline || DEFAULTS.inline).map(norm),
              labels: o.labels || DEFAULTS.labels };
   }
   // Lower case, with Word's curly apostrophes made straight.
   function norm(s) { return s.toLowerCase().replace(/[‘’]/g, "'"); }
   function esc(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  // A field with nothing written in it: blank, or only the line printed for writing on (____ or .....).
+  function blank(s) { return /^[\s_.\-–—:·…]*$/.test(s); }
 
   // Turns pdf.js getTextContent() output into items for findClientBlock.
   function textItems(textContent) {
@@ -40,37 +49,85 @@ var SignCore = (function () {
     return lines;
   }
 
+  // Every place a heading appears: [{x, y, end, size, line}], lowest on the page first.
+  // end is where the heading's text stops (x), for signing on the heading's own line.
+  function headingAnchors(lines, head) {
+    var out = [];
+    var re = new RegExp(head.split(' ').map(esc).join('\\s+'), 'g');
+    lines.forEach(function (l) {
+      // the line's text with where each item starts, so a match maps back to its items
+      var t = '', starts = [];
+      l.items.forEach(function (i) { if (t) t += ' '; starts.push(t.length); t += norm(i.str); });
+      // x at character index c of the line text
+      function xAt(c) {
+        var k = starts.length - 1;
+        while (k > 0 && starts[k] > c) k--;
+        var i = l.items[k], s = i.str.length, off = Math.min(s, Math.max(0, c - starts[k]));
+        return i.x + (s ? i.w * off / s : 0);
+      }
+      re.lastIndex = 0;
+      var m = re.exec(t);
+      if (!m) return;
+      if (head === 'client' && !/^\s*client\s*:?\s*$/i.test(l.text)) {
+        // bare "client" only counts as a heading when it stands on its own in its column,
+        // with no word right beside it (e.g. "Client" + "Company:" as separate items)
+        var own = l.items.some(function (i) {
+          if (!/^\s*client\s*:?\s*$/i.test(i.str)) return false;
+          var gap = Math.max(6, (i.h || 8) * 1.5);
+          return !l.items.some(function (n) { return n !== i && n.x + n.w > i.x - gap && n.x < i.x + i.w + gap; });
+        });
+        if (!own) return;
+        var alone = l.items.filter(function (i) { return /^\s*client\s*:?\s*$/i.test(i.str); })[0];
+        var lead = alone.str.length - alone.str.replace(/^\s+/, '').length;
+        m = { index: starts[l.items.indexOf(alone)] + lead, 0: 'client' };
+      }
+      // where the heading, and a colon after it, ends
+      var e = m.index + m[0].length, j = e;
+      while (t[j] === ' ') j++;
+      if (t[j] === ':') e = j + 1;
+      var k = starts.length - 1;
+      while (k > 0 && starts[k] > m.index) k--;
+      out.push({ x: xAt(m.index), y: l.y, end: xAt(e), size: l.items[k].h || 9, line: l });
+    });
+    return out.sort(function (a, b) { return a.y - b.y; });
+  }
+
   // Finds the client signature block on one page.
   // items: [{str, x, y, w, h}] in PDF user space. box: {x0, y0, x1, y1}.
+  // Three shapes are read:
+  //  - labelled: heading, then Signature / Name / Company / Date labels in any order under it
+  //  - boxed: heading with only a "Date :" line under it (e.g. "Reviewed by Client"); signed in the space between
+  //  - inline: heading with room to sign on its own line ("Test Witnessed By: ______"), for o.inline headings only
+  // Result: {kind, heading, optional, anchor, sig, name, date, sigFilled, area, already}. already says why
+  // the sheet looks signed from its text (a name or date written in, something on the signature line).
   function findClientBlock(items, box, options) {
     var o = opts(options);
     var lines = buildLines(items);
-    var anchor = null;
-    // Headings are tried in order; the first one found anywhere on the page wins.
-    for (var hi = 0; hi < o.headings.length && !anchor; hi++) {
-      var head = o.headings[hi], first = head.split(' ')[0];
-      lines.forEach(function (l) {
-        var t = norm(l.text);
-        var at = t.indexOf(head);
-        if (at < 0) return;
-        if (head === 'client' && !/^\s*client\s*:?\s*$/i.test(l.text)) {
-          // bare "client" only counts as a heading when it stands on its own in its column,
-          // with no word right beside it (e.g. "Client" + "Company:" as separate items)
-          var own = l.items.some(function (i) {
-            if (!/^\s*client\s*:?\s*$/i.test(i.str)) return false;
-            var gap = Math.max(6, (i.h || 8) * 1.5);
-            return !l.items.some(function (n) { return n !== i && n.x + n.w > i.x - gap && n.x < i.x + i.w + gap; });
-          });
-          if (!own) return;
+    var lists = [{ heads: o.headings, optional: false }, { heads: o.fallback, optional: true }];
+    for (var li = 0; li < lists.length; li++) {
+      // Headings are tried in order; each place a heading appears is tried, lowest on the page first.
+      for (var hi = 0; hi < lists[li].heads.length; hi++) {
+        var head = lists[li].heads[hi];
+        var anchors = headingAnchors(lines, head);
+        for (var ai = 0; ai < anchors.length; ai++) {
+          var a = anchors[ai];
+          var r = labelledBlock(items, box, o, a) ||
+            (head !== 'client' ? boxedBlock(items, box, o, a) : null) ||
+            (o.inline.indexOf(head) >= 0 ? inlineBlock(items, box, a) : null);
+          if (r) {
+            r.heading = head;
+            r.optional = lists[li].optional;
+            r.anchor = { x: a.x, y: a.y };
+            return r;
+          }
         }
-        var it = l.items.filter(function (i) { return norm(i.str).indexOf(first) >= 0; })[0] || l.items[0];
-        var off = norm(it.str).indexOf(first);
-        var x = it.x + (off > 0 ? it.w * off / it.str.length : 0);
-        if (!anchor || l.y < anchor.y) anchor = { x: x, y: l.y };
-      });
+      }
     }
-    if (!anchor) return null;
+    return null;
+  }
 
+  // Labels in the heading's column below it: {key: {x, y, end, size, filled}}, nearest to the heading.
+  function findLabels(items, box, o, anchor) {
     var pageW = box.x1 - box.x0;
     var fieldRight = box.x1 - pageW * 0.05;
     var labels = {};
@@ -86,23 +143,47 @@ var SignCore = (function () {
         if (it.x < anchor.x - 45 || it.x > anchor.x + 90) return;
         if (!best || it.y > best.y) {
           var end = it.x + (it.str.length ? it.w * m[0].length / it.str.length : it.w);
-          var filled = rest.trim().length > 0 || items.some(function (o) {
-            return o !== it && o.str.trim() && Math.abs(o.y - it.y) < 3 && o.x > end + 1 && o.x < fieldRight;
+          // written in: text after the label, in the same item or beside it (a printed ____ line doesn't count)
+          var filled = !blank(rest) || items.some(function (n) {
+            return n !== it && !blank(n.str) && Math.abs(n.y - it.y) < 3 && n.x > end + 1 && n.x < fieldRight &&
+              !re.test(n.str) && n.x < anchor.x + pageW * 0.45;
           });
           best = { x: it.x, y: it.y, end: end, size: it.h || 10, filled: filled };
         }
       });
       if (best) labels[key] = best;
     });
-    if (!labels.signature) return null;
+    return labels;
+  }
 
+  function alreadyReason(sigFilled, name, date) {
+    if (sigFilled) return 'Something is already on the client signature line';
+    if (name && name.filled) return 'The client name is already filled in';
+    if (date && date.filled) return 'The client date is already filled in';
+    return null;
+  }
+
+  function labelledBlock(items, box, o, anchor) {
+    var labels = findLabels(items, box, o, anchor);
+    if (!labels.signature) return null;
+    var pageW = box.x1 - box.x0;
+    var fieldRight = box.x1 - pageW * 0.05;
     var sig = labels.signature;
     var colX = Math.max.apply(null, Object.keys(labels).map(function (k) { return labels[k].end; })) + 12;
-    var rowH = labels.name ? sig.y - labels.name.y : 20;
-    var h = Math.max(14, Math.min(36, rowH * 1.15, anchor.y - sig.y - 2));
+    // row height: the nearest other label, above or below (labels come in any order)
+    var rowH = 20;
+    Object.keys(labels).forEach(function (k) {
+      if (k !== 'signature') { var d = Math.abs(labels[k].y - sig.y); if (d > 3 && (rowH === 20 || d < rowH)) rowH = d; }
+    });
+    // room above the signature line: the nearest text above it in the column (a label, a ____ line, the heading)
+    var above = anchor.y;
+    items.forEach(function (it) {
+      if (it.str.trim() && it.y > sig.y + 3 && it.y < above && it.x < fieldRight && it.x + it.w > colX - 12) above = it.y;
+    });
+    var h = Math.max(14, Math.min(36, rowH * 1.15, above - sig.y - 2));
     var sx = colX;
     var result = {
-      anchor: anchor,
+      kind: 'labelled',
       sig: { x: sx, y: sig.y - 3, h: h, maxW: Math.max(40, fieldRight - sx) },
       name: null, date: null, sigFilled: sig.filled
     };
@@ -110,7 +191,62 @@ var SignCore = (function () {
       var L = labels[k];
       if (L) result[k] = { x: colX, y: L.y, size: Math.max(7, Math.min(14, L.size)), filled: L.filled };
     });
+    result.area = { x0: sx - 4, y0: sig.y - 3, x1: sx + Math.min(result.sig.maxW, 220), y1: sig.y - 3 + h };
+    result.already = alreadyReason(sig.filled, result.name, result.date);
     return result;
+  }
+
+  // The next item to the right of x on the heading's line (the next column's heading or an "OF:" label).
+  function rightEdge(box, anchor, fromX) {
+    var pageW = box.x1 - box.x0, edge = box.x1 - pageW * 0.05;
+    anchor.line.items.forEach(function (i) { if (i.x > fromX + 2 && i.x < edge) edge = i.x; });
+    return edge;
+  }
+
+  // "Reviewed by Client:" with a "Date :" line under it and no Signature / Name labels: the signature goes in
+  // the space between the heading and the Date line, the date on the Date line.
+  function boxedBlock(items, box, o, anchor) {
+    var labels = findLabels(items, box, o, anchor);
+    if (labels.signature || labels.name || !labels.date) return null;
+    var d = labels.date;
+    var right = rightEdge(box, anchor, anchor.end);
+    var top = anchor.y - Math.max(2, anchor.size * 0.3), bottom = d.y + d.size + 2;
+    if (top - bottom < 14 || right - anchor.x < 60) return null;
+    // anything written in the space means it's been signed already
+    var filledIn = items.some(function (it) {
+      return !blank(it.str) && it.y > bottom && it.y < top - 1 && it.x >= anchor.x - 4 && it.x < right - 2;
+    });
+    var sig = { x: anchor.x + 2, y: bottom + 1, h: Math.min(36, top - bottom - 2), maxW: Math.max(40, right - anchor.x - 8) };
+    var date = { x: d.end + 6, y: d.y, size: Math.max(7, Math.min(14, d.size)), filled: d.filled };
+    return {
+      kind: 'boxed', sig: sig, name: null, date: date, sigFilled: filledIn,
+      area: { x0: anchor.x, y0: bottom, x1: right - 4, y1: top },
+      already: alreadyReason(filledIn, null, date)
+    };
+  }
+
+  // "TEST WITNESSED BY: __________  OF: ________": the signature on the heading's line, name and date small under it.
+  function inlineBlock(items, box, anchor) {
+    var line = anchor.line;
+    // the next label on the line ("OF:"); written-in text before it means it's filled in
+    var right = box.x1 - (box.x1 - box.x0) * 0.05, filledIn = false;
+    line.items.forEach(function (i) {
+      if (i.x <= anchor.end + 1 || blank(i.str)) return;
+      if (/:\s*$/.test(i.str)) { if (i.x < right) right = i.x; } else filledIn = true;
+    });
+    if (right - anchor.end < 60) return null;
+    var above = anchor.y + 40;
+    items.forEach(function (it) {
+      if (it.str.trim() && it.y > anchor.y + 3 && it.y < above && it.x < right && it.x + it.w > anchor.end) above = it.y;
+    });
+    var h = Math.max(12, Math.min(24, above - anchor.y - 6));
+    var sig = { x: anchor.end + 6, y: anchor.y - 3, h: h, maxW: Math.max(40, right - anchor.end - 14) };
+    return {
+      kind: 'inline', sig: sig, sigFilled: filledIn,
+      name: null, date: null, under: { x: sig.x, y: anchor.y - 9, size: 6.5 },
+      area: { x0: sig.x, y0: sig.y, x1: sig.x + sig.maxW, y1: sig.y + h },
+      already: alreadyReason(filledIn, null, null)
+    };
   }
 
   // Works out what to draw on one page.
@@ -132,7 +268,130 @@ var SignCore = (function () {
     var t = [];
     if (a.name && !a.name.filled && name) t.push({ str: name, x: a.name.x, y: a.name.y, size: a.name.size });
     if (a.date && !a.date.filled && date) t.push({ str: date, x: a.date.x, y: a.date.y, size: a.date.size });
+    // inline blocks have no Name or Date line: both go small under the signature
+    if (a.under && (name || date)) t.push({ str: [name, date].filter(Boolean).join('   '), x: a.under.x, y: a.under.y, size: a.under.size });
     return t;
+  }
+
+  /* ---------- sheets with no client block: an added "Reviewed by Client" stamp ---------- */
+
+  var STAMP = { w: 190, h: 64, label: 'Reviewed by Client' };
+
+  // What to draw for an added client sign-off whose frame's bottom-left corner is at (x, y):
+  // a thin frame, the label, the signature, then name and date on one line.
+  function stampPlacement(at, box, name, date) {
+    var w = STAMP.w, h = STAMP.h;
+    var x = Math.max(box.x0 + 4, Math.min(box.x1 - w - 4, at.x));
+    var y = Math.max(box.y0 + 4, Math.min(box.y1 - h - 4, at.y));
+    var texts = [{ str: STAMP.label, x: x + 5, y: y + h - 11, size: 7.5, bold: true }];
+    if (name) texts.push({ str: 'Name: ' + name, x: x + 5, y: y + 6, size: 7 });
+    if (date) texts.push({ str: 'Date: ' + date, x: x + w - 62, y: y + 6, size: 7 });
+    return { sig: { x: x + 6, y: y + 16, h: 30, maxW: w - 12 }, texts: texts, frame: { x: x, y: y, w: w, h: h } };
+  }
+
+  // Luminance per pixel (0-255) of RGBA data, with transparent pixels as white.
+  function lum(rgba, i) {
+    var a = rgba[i + 3] / 255;
+    return (0.299 * rgba[i] + 0.587 * rgba[i + 1] + 0.114 * rgba[i + 2]) * a + 255 * (1 - a);
+  }
+
+  // Finds empty space for the stamp near the bottom of the page, above the footer.
+  // rgba: the page rendered at `scale` pixels per point (w x h pixels). items: its text items (for the footer).
+  // Returns the frame's bottom-left corner in PDF units, or null when no empty space is big enough.
+  // Prefers the lowest spot, then the one furthest right (where client sign-offs usually sit).
+  function emptySpot(rgba, w, h, scale, box, items) {
+    var H = box.y1 - box.y0;
+    // the footer: text in the bottom 10% of the page; the stamp goes above it
+    var floor = box.y0 + 24;
+    (items || []).forEach(function (it) {
+      if (it.str.trim() && it.y < box.y0 + H * 0.1) floor = Math.max(floor, it.y + (it.h || 8) + 6);
+    });
+    var sat = new Uint32Array((w + 1) * (h + 1)); // summed-area table of dark pixels
+    for (var y = 0; y < h; y++) {
+      var run = 0;
+      for (var x = 0; x < w; x++) {
+        if (lum(rgba, (y * w + x) * 4) < 200) run++;
+        sat[(y + 1) * (w + 1) + x + 1] = sat[y * (w + 1) + x + 1] + run;
+      }
+    }
+    function dark(x0, y0, x1, y1) { // pixel rect, inclusive-exclusive
+      return sat[y1 * (w + 1) + x1] - sat[y0 * (w + 1) + x1] - sat[y1 * (w + 1) + x0] + sat[y0 * (w + 1) + x0];
+    }
+    var pad = 6, sw = STAMP.w + 2 * pad, sh = STAMP.h + 2 * pad;
+    var pw = Math.ceil(sw * scale), ph = Math.ceil(sh * scale);
+    var step = 4;
+    // from the floor up to 60% of the way up the page
+    for (var by = floor; by < box.y0 + H * 0.6; by += step) {
+      var py1 = Math.round((box.y1 - (by - pad)) * scale), py0 = py1 - ph;
+      if (py0 < 0 || py1 > h) continue;
+      for (var bx = box.x1 - 24 - sw; bx >= box.x0 + 24; bx -= step * 2) {
+        var px0 = Math.round((bx - box.x0) * scale), px1 = px0 + pw;
+        if (px0 < 0 || px1 > w) continue;
+        if (dark(px0, py0, px1, py1) === 0) return { x: bx + pad, y: by };
+      }
+    }
+    return null;
+  }
+
+  // Ink or an image in a signature area, e.g. a signature added in another PDF editor.
+  // rgba: the area rendered (w x h pixels). skip: rects [{x0, y0, x1, y1}] in pixels to ignore (known text).
+  // Ruled lines are ignored: long straight runs of dark pixels (cell borders, a ____ line), and the pixels
+  // right beside them (anti-aliasing), wherever they start and stop in the area.
+  function inkInBox(rgba, w, h, skip) {
+    var dark = new Uint8Array(w * h);
+    for (var i = 0; i < w * h; i++) if (lum(rgba, i * 4) < 160) dark[i] = 1;
+    (skip || []).forEach(function (r) {
+      for (var y2 = Math.max(0, Math.floor(r.y0)); y2 < Math.min(h, Math.ceil(r.y1)); y2++)
+        for (var x2 = Math.max(0, Math.floor(r.x0)); x2 < Math.min(w, Math.ceil(r.x1)); x2++) dark[y2 * w + x2] = 0;
+    });
+    var line = new Uint8Array(w * h);
+    var hMin = Math.max(24, Math.round(w * 0.2)), vMin = Math.max(16, Math.round(h * 0.5));
+    function mark(i) { line[i] = 1; }
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w;) {
+        if (!dark[y * w + x]) { x++; continue; }
+        var s = x; while (x < w && dark[y * w + x]) x++;
+        if (x - s >= hMin) for (var k = s; k < x; k++) { mark(y * w + k); if (y > 0) mark((y - 1) * w + k); if (y < h - 1) mark((y + 1) * w + k); }
+      }
+    }
+    for (var cx = 0; cx < w; cx++) {
+      for (var cy = 0; cy < h;) {
+        if (!dark[cy * w + cx]) { cy++; continue; }
+        var st = cy; while (cy < h && dark[cy * w + cx]) cy++;
+        if (cy - st >= vMin) for (var j = st; j < cy; j++) { mark(j * w + cx); if (cx > 0) mark(j * w + cx - 1); if (cx < w - 1) mark(j * w + cx + 1); }
+      }
+    }
+    var count = 0;
+    for (var p = 0; p < w * h; p++) if (dark[p] && !line[p]) count++;
+    var ratio = count / Math.max(1, w * h);
+    return { count: count, ratio: ratio, inked: count >= 40 && ratio >= 0.004 };
+  }
+
+  // The lowest ruled line (a dark row running over half the area's width) in the bottom half of the area,
+  // in pixels from the top, or null. For a boxed sign-off, the top of the Date row under the signature box.
+  function bottomBorder(rgba, w, h) {
+    for (var y = h - 1; y >= Math.floor(h / 2); y--) {
+      var run = 0, best = 0;
+      for (var x = 0; x < w; x++) {
+        if (lum(rgba, (y * w + x) * 4) < 160) { run++; if (run > best) best = run; } else run = 0;
+      }
+      if (best >= w * 0.5) return y;
+    }
+    return null;
+  }
+
+  // The first cell border (a dark column running over half the area's height) at or right of fromX, in pixels,
+  // or null. The text layer doesn't show where a table cell ends, so the page uses this to keep the
+  // signature inside the client's cell.
+  function rightBorder(rgba, w, h, fromX) {
+    for (var x = Math.max(0, fromX); x < w; x++) {
+      var run = 0, best = 0;
+      for (var y = 0; y < h; y++) {
+        if (lum(rgba, (y * w + x) * 4) < 160) { run++; if (run > best) best = run; } else run = 0;
+      }
+      if (best >= h * 0.55) return x;
+    }
+    return null;
   }
 
   function fitImage(sig, aspect) {
@@ -146,15 +405,23 @@ var SignCore = (function () {
     var doc = await lib.PDFDocument.load(bytes, { ignoreEncryption: true });
     var png = await doc.embedPng(sigPng);
     var font = await doc.embedFont(lib.StandardFonts.Helvetica);
+    var bold = null;
     var aspect = png.width / png.height;
-    pages.forEach(function (p) {
-      var page = doc.getPage(p.index);
+    var ink = lib.rgb(0.08, 0.12, 0.35);
+    for (var i = 0; i < pages.length; i++) {
+      var p = pages[i], page = doc.getPage(p.index);
+      if (p.place.frame) {
+        var f = p.place.frame;
+        page.drawRectangle({ x: f.x, y: f.y, width: f.w, height: f.h, borderColor: ink, borderWidth: 0.6 });
+      }
       var r = fitImage(p.place.sig, aspect);
       page.drawImage(png, { x: r.x, y: r.y, width: r.w, height: r.h });
-      p.place.texts.forEach(function (t) {
-        page.drawText(t.str, { x: t.x, y: t.y, size: t.size, font: font, color: lib.rgb(0.08, 0.12, 0.35) });
-      });
-    });
+      for (var k = 0; k < p.place.texts.length; k++) {
+        var t = p.place.texts[k];
+        if (t.bold && !bold) bold = await doc.embedFont(lib.StandardFonts.HelveticaBold);
+        page.drawText(t.str, { x: t.x, y: t.y, size: t.size, font: t.bold ? bold : font, color: ink });
+      }
+    }
     var note = 'Client signed by ' + meta.name + ' on ' + meta.date;
     var kw = []; try { kw = (doc.getKeywords() || '').split(/[;,]\s*/).filter(Boolean); } catch (e) {}
     doc.setKeywords(kw.concat([note]));
@@ -177,7 +444,7 @@ var SignCore = (function () {
   }
 
   // Why a dropped file is left out, or null to include it.
-  // f: {path, error?, signed?, hasText?, hasBlock?}. Called with the path alone before the file is read.
+  // f: {path, error?, signed?, already?, hasText?, hasBlock?}. already: every client block in it is signed already. Called with the path alone before the file is read.
   function leaveOutReason(f) {
     var parts = String(f.path).split(/[\\/]/).filter(Boolean);
     var base = parts[parts.length - 1] || '';
@@ -186,6 +453,7 @@ var SignCore = (function () {
     if (parts.slice(0, -1).some(function (p) { return p.toLowerCase() === 'signed'; })) return 'In a folder called Signed';
     if (f.error) return f.error;
     if (f.signed) return 'Already signed through this page';
+    if (f.already) return 'Already signed';
     if (f.hasText && !f.hasBlock) return 'No sign-off block found';
     return null;
   }
@@ -523,6 +791,7 @@ var SignCore = (function () {
 
   return { DEFAULTS: DEFAULTS, KEYWORD: KEYWORD, NOTES_HEADING: NOTES_HEADING,
            textItems: textItems, buildLines: buildLines, findClientBlock: findClientBlock, placement: placement,
+           STAMP: STAMP, stampPlacement: stampPlacement, emptySpot: emptySpot, inkInBox: inkInBox, rightBorder: rightBorder, bottomBorder: bottomBorder, blank: blank,
            fitImage: fitImage, stampPdf: stampPdf, isSigned: isSigned, plainText: plainText,
            leaveOutReason: leaveOutReason, parseQcms: parseQcms, hintPlacement: hintPlacement, ocrItems: ocrItems,
            groupPages: groupPages, outputName: outputName, trimBox: trimBox,
