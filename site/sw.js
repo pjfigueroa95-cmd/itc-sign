@@ -1,6 +1,6 @@
 // QCMS site mode service worker: keeps the page (one HTML file with everything in it) and its icons so the
 // app opens with no signal. A new build has a new cache name; the old one is dropped when it takes over.
-const CACHE = 'qcms-site-20260925004251658';
+const CACHE = 'qcms-site-20260925011427376';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
