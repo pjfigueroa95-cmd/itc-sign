@@ -9,7 +9,11 @@ var SignCore = (function () {
     // headings that can be signed on their own line, e.g. "TEST WITNESSED BY: ________  OF: ______"
     inline: ['test witnessed by', 'client witness'],
     labels: { signature: ['signature', 'signed', 'sign'], name: ['name', 'print name'],
-              company: ['company', 'organisation', 'organization'], date: ['date'] }
+              company: ['company', 'organisation', 'organization'], date: ['date'] },
+    // The company (contractor) side, for QCMS's Sign as company (D-00); in order, first found wins.
+    company: ['contractor representative', "contractor's representative", 'company representative',
+              'accepted for company', 'verified (qc)', 'verified by', 'qc inspector', 'signed by',
+              'authorised company official signatory', 'authorized company official signatory', 'company signatory']
   };
   function opts(o) {
     o = o || {};
@@ -125,6 +129,150 @@ var SignCore = (function () {
     }
     return null;
   }
+
+  // The company (contractor) signature block on one page: the same shapes as the client block, with the
+  // company headings (options.headings are tried first, e.g. a pack's own words). Null when none is found.
+  function findCompanyBlock(items, box, options) {
+    options = options || {};
+    var heads = (options.headings || []).concat(DEFAULTS.company);
+    return findClientBlock(items, box, { headings: heads, fallback: [], inline: ['signed by'], labels: options.labels });
+  }
+
+  // Placement in a box given as fractions of the page from the top-left (signature_boxes, a layout map's
+  // sign box): the signature in the box, name and date small under it.
+  function boxPlacement(c, box, name, date) {
+    if (!c) return null;
+    var W = box.x1 - box.x0, H = box.y1 - box.y0;
+    var bx = box.x0 + c.x * W, bw = c.w * W, bh = c.h * H, by = box.y1 - (c.y + c.h) * H;
+    var sig = { x: bx + 4, y: by + 2, h: Math.max(10, Math.min(36, bh - 4)), maxW: Math.max(40, bw - 8) };
+    return { sig: sig, texts: [{ str: [name, date].filter(Boolean).join('   '), x: sig.x, y: by - 11, size: 9 }] };
+  }
+
+  /* ---------- checklist rows (digital completion D-01, site mode) ---------- */
+
+  // Column header words, lower case; a pack can add its own (options.headers). pass / fail / na are answer columns.
+  var CHECK_HEADERS = {
+    item: ['item', 'item no', 'item no.', 'no', 'no.', '#'],
+    desc: ['description', 'inspection item', 'inspection activity', 'check', 'activity', 'requirement', 'details'],
+    pass: ['completed', 'complete', 'yes', 'pass', 'ok', 'accepted', 'acceptable', 'satisfactory', 'done'],
+    fail: ['no', 'fail', 'not ok', 'rejected'],
+    na: ['n/a', 'na', 'not applicable'],
+    ref: ['reference document / specification', 'reference document', 'reference', 'specification', 'ref doc', 'ref. doc.'],
+    sign: ['sign & date', 'sign and date', 'sign/date', 'initials & date', 'initial & date', 'initials', 'sign'],
+    remarks: ['remarks', 'comments', 'comment', 'notes']
+  };
+  var ITEM_NO = /^\d{1,3}(\.\d{1,2})?[a-z]?\.?$/i;
+
+  function headerKind(text, headers) {
+    var t = norm(text).replace(/\s+/g, ' ').replace(/\s*:$/, '').trim();
+    var order = ['pass', 'na', 'fail', 'sign', 'ref', 'remarks', 'desc', 'item'];
+    for (var i = 0; i < order.length; i++) if (headers[order[i]].indexOf(t) >= 0) return order[i];
+    return null;
+  }
+
+  // Finds the checklist table on one page: its columns (by their header words, wrapped headers joined) and
+  // its rows (item numbers in the item column under the header, gaps fine), each with its text and height.
+  // items/box as findClientBlock. options.headers: extra words per column kind; options.columns: the columns
+  // found on an earlier page, for a table that runs on with no header repeated.
+  // Result: {columns: {kind: {x0, x1, cx, label}}, answers: [kind...], headerY, rows: [{item, text, y, top, bottom}],
+  //          problem} (problem: why no table could be read, else null). PDF units, y up.
+  function findChecklist(items, box, options) {
+    options = options || {};
+    var headers = {};
+    Object.keys(CHECK_HEADERS).forEach(function (k) {
+      headers[k] = CHECK_HEADERS[k].concat(((options.headers || {})[k] || []).map(norm));
+    });
+    var textItems = items.filter(function (i) { return i.str && i.str.trim(); });
+    var columns = null, headerY = null, headerBottom = null;
+    // header: a line with an answer word (Completed, Yes, N/A ...), its neighbours within 12 pt joined per column
+    var anchors = textItems.filter(function (i) { var k = headerKind(i.str, headers); return k === 'pass' || k === 'na'; })
+      .sort(function (a, b) { return b.y - a.y; });
+    for (var a = 0; a < anchors.length && !columns; a++) {
+      var y0 = anchors[a].y;
+      var band = textItems.filter(function (i) { return Math.abs(i.y - y0) <= 12; }).sort(function (p, q) { return p.x - q.x; });
+      var groups = [];
+      band.forEach(function (it) {
+        var g = groups[groups.length - 1];
+        if (g && it.x < g.x1 + 3) { g.items.push(it); g.x1 = Math.max(g.x1, it.x + it.w); } else groups.push({ x0: it.x, x1: it.x + it.w, items: [it] });
+      });
+      var found = {}, kinds = [];
+      groups.forEach(function (g) {
+        var text = g.items.slice().sort(function (p, q) { return q.y - p.y || p.x - q.x; }).map(function (i) { return i.str.trim(); }).join(' ');
+        var k = headerKind(text, headers) || headerKind(text.replace(/\s*\/\s*$/, ''), headers);
+        if (!k) g.items.forEach(function (i) { k = k || headerKind(i.str, headers); });
+        if (k && !found[k]) { found[k] = { x0: g.x0, x1: g.x1, label: text }; kinds.push(k); }
+      });
+      // one-letter answer headers beside N/A: A (accept) / R (reject), Y / N
+      if (found.na) {
+        groups.forEach(function (g) {
+          var t = norm(g.items.map(function (i) { return i.str.trim(); }).join(' '));
+          var k = (t === 'a' || t === 'y') ? 'pass' : (t === 'r' || t === 'n') ? 'fail' : null;
+          if (k && !found[k]) { found[k] = { x0: g.x0, x1: g.x1, label: g.items.map(function (i) { return i.str.trim(); }).join(' ') }; kinds.push(k); }
+        });
+      }
+      var answers = ['pass', 'fail', 'na'].filter(function (k) { return found[k]; });
+      if (answers.length && kinds.length >= 3) {
+        columns = found;
+        headerY = Math.max.apply(null, band.map(function (i) { return i.y + (i.h || 8); }));
+        headerBottom = Math.min.apply(null, band.map(function (i) { return i.y; }));
+      }
+    }
+    if (!columns && options.columns) { columns = options.columns; headerY = box.y1; headerBottom = box.y1; }
+    if (!columns) return { columns: null, answers: [], headerY: null, rows: [], problem: 'No checklist header found (a Completed / N/A or Yes / No / N/A column heading).' };
+
+    // column edges: halfway between neighbouring headers, the first from the item numbers' left, the last to the margin
+    var order = Object.keys(columns).sort(function (p, q) { return columns[p].x0 - columns[q].x0; });
+    var cols = {};
+    order.forEach(function (k, i) {
+      var c = columns[k], prev = columns[order[i - 1]], next = columns[order[i + 1]];
+      // cx: the header's centre (answer and sign headers sit centred over their cells, so a tick goes there)
+      cols[k] = { x0: prev ? (prev.x1 + c.x0) / 2 : Math.max(box.x0, c.x0 - 6), x1: next ? (c.x1 + next.x0) / 2 : Math.max(c.x1 + 6, box.x1 - (box.x1 - box.x0) * 0.05), cx: (c.x0 + c.x1) / 2, label: c.label };
+    });
+    var firstAnswer = Math.min.apply(null, ['pass', 'fail', 'na'].filter(function (k) { return cols[k]; }).map(function (k) { return cols[k].x0; }));
+    var itemCol = cols.item || cols[order[0]];
+    var descX0 = cols.desc ? cols.desc.x0 : itemCol.x1;
+
+    // Item numbers printed left of every header (Word forms often head the item and description together, or
+    // leave the item column unheaded): they are the item column, and the description starts after them.
+    var firstHeadX = columns[order[0]].x0;
+    var leftNums = textItems.filter(function (i) {
+      return i.y < headerBottom - 2 && ITEM_NO.test(i.str.trim()) && i.x + (i.w || 0) < firstHeadX - 2 && i.x >= box.x0;
+    });
+    if (leftNums.length >= 2) {
+      var numsX0 = Math.min.apply(null, leftNums.map(function (i) { return i.x; }));
+      var numsX1 = Math.max.apply(null, leftNums.map(function (i) { return i.x + (i.w || 0); }));
+      itemCol = { x0: numsX0 - 2, x1: numsX1 + 2, cx: (numsX0 + numsX1) / 2, label: '' };
+      descX0 = numsX1 + 1;
+    }
+    // rows: item numbers in the item column under the header, top down, until a big gap
+    var nums = textItems.filter(function (i) {
+      return i.y < headerBottom - 2 && ITEM_NO.test(i.str.trim()) && i.x >= itemCol.x0 - 4 && i.x < Math.max(itemCol.x1, descX0) + 2;
+    }).sort(function (p, q) { return q.y - p.y; });
+    var rows = [];
+    for (var n = 0; n < nums.length; n++) {
+      if (rows.length) {
+        var gap = rows[rows.length - 1].y - nums[n].y;
+        var usual = rows.length > 1 ? (rows[0].y - rows[rows.length - 1].y) / (rows.length - 1) : 30;
+        if (gap > Math.max(45, usual * 3)) break;
+      }
+      rows.push({ item: nums[n].str.trim().replace(/\.$/, ''), y: nums[n].y, h: nums[n].h || 8 });
+    }
+    if (!rows.length) return { columns: cols, answers: [], headerY: headerY, rows: [], problem: 'A checklist header was found but no item numbers under it.' };
+    var step = rows.length > 1 ? (rows[0].y - rows[rows.length - 1].y) / (rows.length - 1) : 20;
+    rows.forEach(function (r, i) {
+      r.top = i ? (rows[i - 1].y + r.y) / 2 + r.h / 2 : Math.min(headerBottom - 1, r.y + step / 2 + r.h / 2);
+      r.bottom = i < rows.length - 1 ? (r.y + rows[i + 1].y) / 2 + rows[i + 1].h / 2 : r.y - step / 2 + r.h / 2;
+      var words = textItems.filter(function (t) { return t.y < r.top && t.y >= r.bottom && t.x >= descX0 - 2 && t.x < firstAnswer - 2 && !(ITEM_NO.test(t.str.trim()) && t.x < descX0 + 2); });
+      r.text = buildLines(words).sort(function (p, q) { return q.y - p.y; }).map(function (l) { return l.text; }).join(' ').replace(/\s+/g, ' ').trim();
+      delete r.h;
+    });
+    var answers = ['pass', 'fail', 'na'].filter(function (k) { return cols[k]; });
+    return { columns: cols, answers: answers, headerY: headerY, rows: rows, problem: null };
+  }
+
+  // The contractor (company) sign-off block, for digital completion: the company headings, Contractor
+  // Representative first.
+  function findContractorBlock(items, box, options) { return findCompanyBlock(items, box, options); }
 
   // Labels in the heading's column below it: {key: {x, y, end, size, filled}}, nearest to the heading.
   function findLabels(items, box, o, anchor) {
@@ -255,13 +403,26 @@ var SignCore = (function () {
     if (pg.manual) {
       var h = pg.auto ? pg.auto.sig.h : 26;
       var x = pg.manual.x, y = pg.manual.y - h / 2;
-      var texts;
-      if (pg.auto) texts = autoTexts(pg.auto, name, date);
-      else texts = [{ str: [name, date].filter(Boolean).join('   '), x: x, y: y - 11, size: 9 }];
-      return { sig: { x: x, y: y, h: h, maxW: Math.max(40, box.x1 - x - 10) }, texts: texts };
+      var sig = { x: x, y: y, h: h, maxW: Math.max(40, box.x1 - x - 10) };
+      if (pg.auto) return withInsideName(sig, autoTexts(pg.auto, name, date), pg.auto, name);
+      return { sig: sig, texts: [{ str: [name, date].filter(Boolean).join('   '), x: x, y: y - 11, size: 9 }] };
     }
-    if (pg.auto) return { sig: pg.auto.sig, texts: autoTexts(pg.auto, name, date) };
+    if (pg.auto) return withInsideName(pg.auto.sig, autoTexts(pg.auto, name, date), pg.auto, name);
     return null;
+  }
+
+  var INSIDE_NAME_SIZE = 7.5;
+
+  // A block with no Name line of its own (a boxed "Reviewed by Client:" over "Date :"): the name small at
+  // the bottom right inside the signature area, the signature kept clear of it, so the sheet still says who.
+  function withInsideName(sig, texts, a, name) {
+    name = String(name || '').trim();
+    if (!name || a.name || a.under) return { sig: sig, texts: texts };
+    var w = Math.min(sig.maxW / 2, name.length * INSIDE_NAME_SIZE * 0.52); // Helvetica, about half an em a letter
+    return {
+      sig: { x: sig.x, y: sig.y, h: sig.h, maxW: Math.max(40, sig.maxW - w - 6) },
+      texts: texts.concat([{ str: name, x: sig.x + sig.maxW - w, y: sig.y + 1, size: INSIDE_NAME_SIZE }]),
+    };
   }
 
   function autoTexts(a, name, date) {
@@ -481,12 +642,7 @@ var SignCore = (function () {
 
   // Placement from a QCMS hint: the client box as fractions of the page from the top-left.
   function hintPlacement(hint, box, name, date) {
-    var c = hint && hint.client;
-    if (!c) return null;
-    var W = box.x1 - box.x0, H = box.y1 - box.y0;
-    var bx = box.x0 + c.x * W, bw = c.w * W, bh = c.h * H, by = box.y1 - (c.y + c.h) * H;
-    var sig = { x: bx + 4, y: by + 2, h: Math.max(10, Math.min(36, bh - 4)), maxW: Math.max(40, bw - 8) };
-    return { sig: sig, texts: [{ str: [name, date].filter(Boolean).join('   '), x: sig.x, y: by - 11, size: 9 }] };
+    return boxPlacement(hint && hint.client, box, name, date);
   }
 
   // Tesseract words -> text items in PDF units. The image is the page rendered at `scale` pixels
@@ -773,6 +929,48 @@ var SignCore = (function () {
     return lines;
   }
 
+  // The "Tags inspected" box (SITE-TAGS.md): found by its label in the text layer. The space right of the
+  // label to the next text on the line (or the page's right margin) when it is wide enough, else the lines
+  // under the label down to the next text below. filled: text already printed in it (e.g. tags known when
+  // the sheet was made), end: where that text stops. Null when the label isn't on the page.
+  function findTagsBox(items, box) {
+    var lines = buildLines(items), W = box.x1 - box.x0;
+    for (var k = 0; k < lines.length; k++) {
+      var line = lines[k], m = /tags?\s+inspected\s*:?/i.exec(line.text);
+      if (!m) continue;
+      // the label's end: the item holding "inspected", measured in proportion when it has more text in it
+      var labelEnd = null, first = null;
+      for (var j = 0; j < line.items.length; j++) {
+        var it = line.items[j], at = it.str.search(/inspected\s*:?/i);
+        if (/^\s*tags?\b/i.test(it.str) && first === null) first = it;
+        if (at >= 0) {
+          var mm = /inspected\s*:?/i.exec(it.str);
+          var cut = at + mm[0].length;
+          labelEnd = it.x + it.w * (cut / Math.max(1, it.str.length));
+          first = first || it;
+          var rest = it.str.slice(cut).trim();
+          var after = line.items.slice(j + 1).filter(function (x) { return x.x >= labelEnd - 1; });
+          var nextLabel = after.filter(function (x) { return /:\s*$/.test(x.str.trim()); })[0];
+          var filled = [rest].concat(after.filter(function (x) { return !nextLabel || x.x < nextLabel.x; }).map(function (x) { return x.str.trim(); }))
+            .filter(Boolean).join(' ').replace(/[_.]{3,}/g, '').trim();
+          var right = nextLabel ? nextLabel.x - 4 : box.x1 - W * 0.05;
+          var printed = after.filter(function (x) { return !nextLabel || x.x < nextLabel.x; }).filter(function (x) { return !/^[_.\s]+$/.test(x.str); });
+          var end = printed.length ? Math.max.apply(null, printed.map(function (x) { return x.x + x.w; })) : (rest ? it.x + it.w : labelEnd);
+          var h = line.items.reduce(function (a, x) { return Math.max(a, x.h || 0); }, 6);
+          var below = lines.filter(function (l) { return l.y < line.y - 2 && l.items.some(function (x) { return x.x < right && x.x + x.w > first.x; }); })
+            .sort(function (a, b) { return b.y - a.y; })[0];
+          var floor = below ? below.y + (below.items[0].h || 7) + 1 : line.y - 3 * h;
+          floor = Math.max(floor, line.y - 3.5 * h);
+          if (right - Math.max(labelEnd, end) >= W * 0.2) {
+            return { page: null, x0: labelEnd + 3, x1: right, y1: line.y + h + 1, y0: Math.min(line.y - 2, floor), labelled: true, filled: filled, end: Math.max(end, labelEnd) };
+          }
+          return { page: null, x0: first.x, x1: right, y1: line.y - 2, y0: floor, labelled: true, filled: "", end: first.x };
+        }
+      }
+    }
+    return null;
+  }
+
   // Adds the "Notes from the client" page(s): one "<ITC>: <note>" entry per note. notes: [{label, note}].
   async function addNotesPage(lib, bytes, notes, meta) {
     var doc = await lib.PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
@@ -802,6 +1000,8 @@ var SignCore = (function () {
 
   return { DEFAULTS: DEFAULTS, KEYWORD: KEYWORD, NOTES_HEADING: NOTES_HEADING,
            textItems: textItems, buildLines: buildLines, findClientBlock: findClientBlock, placement: placement,
+           findCompanyBlock: findCompanyBlock, boxPlacement: boxPlacement,
+           CHECK_HEADERS: CHECK_HEADERS, findChecklist: findChecklist, findContractorBlock: findContractorBlock, findTagsBox: findTagsBox,
            STAMP: STAMP, stampPlacement: stampPlacement, emptySpot: emptySpot, inkInBox: inkInBox, rightBorder: rightBorder, bottomBorder: bottomBorder, blank: blank,
            fitImage: fitImage, stampPdf: stampPdf, isSigned: isSigned, plainText: plainText,
            leaveOutReason: leaveOutReason, parseQcms: parseQcms, hintPlacement: hintPlacement, ocrItems: ocrItems,
