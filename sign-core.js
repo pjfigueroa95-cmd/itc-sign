@@ -591,7 +591,8 @@ var SignCore = (function () {
       for (var k = 0; k < p.place.texts.length; k++) {
         var t = p.place.texts[k];
         if (t.bold && !bold) bold = await doc.embedFont(lib.StandardFonts.HelveticaBold);
-        page.drawText(t.str, { x: t.x, y: t.y, size: t.size, font: t.bold ? bold : font, color: ink });
+        var f = t.bold ? bold : font;
+        page.drawText(t.str, { x: t.x, y: t.y, size: fitSize(t, function (str, z) { return f.widthOfTextAtSize(str, z); }), font: f, color: ink });
       }
     }
     var note = 'Client signed by ' + meta.name + ' on ' + meta.date;
@@ -643,6 +644,32 @@ var SignCore = (function () {
   // Placement from a QCMS hint: the client box as fractions of the page from the top-left.
   function hintPlacement(hint, box, name, date) {
     return boxPlacement(hint && hint.client, box, name, date);
+  }
+
+  // Text written into a box of the form (fractions of the page from the top-left), e.g. a sign-off's Name,
+  // Date or Company box: at its left, up to 10 pt (at least 7, less than the box's height), with maxW its
+  // width so the drawing makes a long text smaller to fit (fitSize). null for no box or no text.
+  function boxText(c, box, str) {
+    str = plainText(str).trim();
+    if (!c || !str) return null;
+    var W = box.x1 - box.x0, H = box.y1 - box.y0, bh = c.h * H;
+    return { str: str, x: box.x0 + c.x * W + 3, y: box.y1 - (c.y + c.h) * H + Math.max(2, (bh - 8) / 2),
+             size: Math.max(7, Math.min(10, bh - 4)), maxW: Math.max(10, c.w * W - 6) };
+  }
+
+  // The size a placed text is drawn at: its own, smaller (down to 4 pt) when at that size it is wider than
+  // its maxW. width(str, size) measures it in the font it is drawn in.
+  function fitSize(t, width) {
+    if (!t.maxW) return t.size;
+    var w = width(t.str, t.size);
+    return w > t.maxW ? Math.max(4, Math.floor(t.size * t.maxW / w * 4) / 4) : t.size;
+  }
+
+  // A placement with the signer's company written in the block's Company box (the sign pack's hint), when
+  // the block has one and the company is known.
+  function withCompanyBox(place, c, box, company) {
+    var t = place && boxText(c, box, company);
+    return t ? { sig: place.sig, texts: place.texts.concat([t]), frame: place.frame } : place;
   }
 
   // Tesseract words -> text items in PDF units. The image is the page rendered at `scale` pixels
@@ -1005,6 +1032,7 @@ var SignCore = (function () {
            STAMP: STAMP, stampPlacement: stampPlacement, emptySpot: emptySpot, inkInBox: inkInBox, rightBorder: rightBorder, bottomBorder: bottomBorder, blank: blank,
            fitImage: fitImage, stampPdf: stampPdf, isSigned: isSigned, plainText: plainText,
            leaveOutReason: leaveOutReason, parseQcms: parseQcms, hintPlacement: hintPlacement, ocrItems: ocrItems,
+           boxText: boxText, fitSize: fitSize, withCompanyBox: withCompanyBox,
            groupPages: groupPages, outputName: outputName, trimBox: trimBox,
            jpegInfo: jpegInfo, orientTransform: orientTransform, greyscale: greyscale, evenLighting: evenLighting, otsuThreshold: otsuThreshold,
            inkImage: inkImage, removeSpecks: removeSpecks, cleanSignature: cleanSignature,

@@ -475,6 +475,8 @@ async function analyse(file) {
       const hint = qcms && qcms.pages[i];
       // what the sender says about this form's client sign-off: block | optional_stamp | none
       pg.signoff = (hint && hint.client_signoff) || null;
+      // the client block's Company box (from the sender's form map): the client's company goes in it
+      pg.companyBox = (hint && hint.client_company) || null;
       if (pg.signoff !== 'none') {
         pg.block = SignCore.findClientBlock(items, box, findOpts);
         if (pg.block) pg.already = pg.block.already || (await inkInArea(page, pg.block, items, pg));
@@ -656,8 +658,13 @@ const METHOD = {
   stampClick: ['Sign-off added', 'info', 'Client sign-off added where you clicked.'],
 };
 
-// What to draw on a page, or null.
+// What to draw on a page, or null: with the client's company in the block's Company box when the pack says where it is.
 function place(pg) {
+  const p = placeOnly(pg);
+  return pg.stamp || !pg.companyBox ? p : SignCore.withCompanyBox(p, pg.companyBox, pg.box, S.company);
+}
+
+function placeOnly(pg) {
   const name = nameText(), date = dateText();
   if (pg.stamp) return SignCore.stampPlacement(pg.stamp, pg.box, name, date);
   if (pg.manual) return SignCore.placement({ box: pg.box, auto: pg.block || pg.ocr, manual: pg.manual }, name, date);
@@ -859,7 +866,10 @@ function drawOverlay(g) {
   ctx.fillStyle = '#14205a';
   for (const t of pl.texts) {
     const p = vp.convertToViewportPoint(t.x, t.y);
-    ctx.font = (t.bold ? 'bold ' : '') + (t.size * vp.scale) + 'px Helvetica, Arial, sans-serif';
+    const font = (z) => (t.bold ? 'bold ' : '') + z + 'px Helvetica, Arial, sans-serif';
+    // the size it will be drawn at: smaller when it runs past its box (a long company name)
+    const size = SignCore.fitSize(t, (str, z) => { ctx.font = font(z); return ctx.measureText(str).width; });
+    ctx.font = font(size * vp.scale);
     ctx.fillText(t.str, p[0], p[1]);
   }
   ctx.globalAlpha = 1;
