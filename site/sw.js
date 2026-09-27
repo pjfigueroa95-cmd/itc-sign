@@ -1,6 +1,6 @@
 // QCMS site mode service worker: keeps the page (one HTML file with everything in it) and its icons so the
 // app opens with no signal. A new build has a new cache name; the old one is dropped when it takes over.
-const CACHE = 'qcms-site-20260927063636427';
+const CACHE = 'qcms-site-20260927071117169';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 // The photo reader (ocr/: onnxruntime-web, PaddleOCR's models, zxing; about 25 MB; site/src/ocrfiles.ts, the
