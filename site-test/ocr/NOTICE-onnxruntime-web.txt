@@ -1,0 +1,1 @@
+ort.wasm.min.mjs, ort-wasm-simd-threaded.mjs and .wasm: onnxruntime-web 1.23.0, Copyright (c) Microsoft Corporation. MIT License: https://github.com/microsoft/onnxruntime/blob/main/LICENSE
