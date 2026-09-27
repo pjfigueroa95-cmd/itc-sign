@@ -1,21 +1,45 @@
 // QCMS site mode service worker: keeps the page (one HTML file with everything in it) and its icons so the
-// app opens with no signal. A new build has a new cache name; the old one is dropped when it takes over.
-const CACHE = 'qcms-site-20260927091846391';
-const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
+// app opens with no signal, and makes updates behave like a published app's (site/src/update.ts): the app
+// always opens from the copy kept here; a new version (a new sw.js, which the browser checks for in the
+// background) is fetched and kept, then waits until the user taps "Update ready" (the page sends 'update-now').
+// It never switches by itself. An update never touches the app's data (IndexedDB): only its own caches.
+//
+// Two copies of the app run on the same site (site/src/channel.ts): the live one (…/site/) and the test one
+// (…/site-test/), from the same build. Cache Storage is shared by the whole site, so each copy names its caches
+// apart and only ever deletes its own: the live copy's are qcms-site-<build> and qcms-ocr-<version> (the names
+// it always had), the test copy's qcms-site-test-<build> and qcms-ocr-test-<version>.
+const BUILD = '20260927092838525';
+const TEST = /\/site-test\/$/.test(new URL(self.registration.scope).pathname);
+const CACHE = `qcms-site-${TEST ? 'test-' : ''}${BUILD}`;
+const FILES = ['./', './index.html', './manifest.webmanifest', './manifest-test.webmanifest', './icon-192.png', './icon-512.png'];
 
 // The photo reader (ocr/: onnxruntime-web, PaddleOCR's models, zxing; about 25 MB; site/src/ocrfiles.ts, the
-// build writes the name and the list in): kept in their own cache named by their versions, so a new page
+// build writes the version and the list in): kept in their own cache named by their version, so a new page
 // build doesn't fetch them again. Kept copy first. Fetched once in the background when the app opens.
-const OCR = "qcms-ocr-ppocrv5m-en-ort1.23.0-zx3.1.4";
+const OCR_VERSION = "ppocrv5m-en-ort1.23.0-zx3.1.4";
+const OCR = `qcms-ocr-${TEST ? 'test-' : ''}${OCR_VERSION}`;
 const OCR_FILES = ["./ocr/ort.wasm.min.mjs","./ocr/ort-wasm-simd-threaded.mjs","./ocr/ort-wasm-simd-threaded.wasm","./ocr/det.onnx","./ocr/rec-en.onnx","./ocr/rec-en-dict.json","./ocr/zxing_reader.wasm"];
 const isOcr = (url) => url.origin === location.origin && url.pathname.includes('/ocr/');
 
+/** This copy's own page caches, and its own photo reader caches: the only ones it ever deletes. */
+const ownPage = (k) => (TEST ? /^qcms-site-test-\d+$/ : /^qcms-site-\d+$/).test(k);
+const ownOcr = (k) => (TEST ? k.startsWith('qcms-ocr-test-') : k.startsWith('qcms-ocr-') && !k.startsWith('qcms-ocr-test-'));
+
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
+  // fetched fresh (not from the browser's HTTP cache), kept, then waiting: no skipWaiting here
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES.map((f) => new Request(f, { cache: 'reload' })))));
 });
 
 self.addEventListener('activate', (e) => {
-  e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => (k.startsWith('qcms-site-') && k !== CACHE) || (k.startsWith('qcms-ocr-') && k !== OCR) || k === 'qcms-cdn').map((k) => caches.delete(k)))).then(() => self.clients.claim()));
+  // this copy's older page caches (and the old CDN cache the live copy once had); the photo reader's older
+  // cache goes only once the new one is complete (warmOcr), so the reader keeps working with no signal
+  e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => (ownPage(k) && k !== CACHE) || (!TEST && k === 'qcms-cdn')).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
+});
+
+self.addEventListener('message', (e) => {
+  // the tap on "Update ready": this waiting version takes over (the page opens again from it)
+  if (e.data === 'update-now') self.skipWaiting();
+  else if (e.data === 'warm-ocr') e.waitUntil(warmOcr());
 });
 
 /**
@@ -43,7 +67,7 @@ self.addEventListener('fetch', (e) => {
   );
 });
 
-/** Fetches the photo reader's files not kept yet (in the background; a failure just means next time). */
+/** Fetches the photo reader's files not kept yet (in the background; a failure just means next time); once all are kept, this copy's older reader caches go. */
 async function warmOcr() {
   const c = await caches.open(OCR);
   for (const f of OCR_FILES) {
@@ -51,24 +75,26 @@ async function warmOcr() {
     if (await c.match(url)) continue;
     try {
       const res = await fetch(url);
-      if (res.ok) await c.put(url, res);
+      if (!res.ok) return;
+      await c.put(url, res);
     } catch {
       return;
     }
   }
+  const keys = await caches.keys();
+  await Promise.all(keys.filter((k) => ownOcr(k) && k !== OCR).map((k) => caches.delete(k)));
 }
-self.addEventListener('message', (e) => {
-  if (e.data === 'warm-ocr') e.waitUntil(warmOcr());
-});
 
-// The page: network first (so an update shows when there is signal), the kept copy when there is none.
+// The page: the copy kept with this version, always (so the app never changes under the user); the network
+// only for something not kept (then kept), and the kept page when there is no signal.
 self.addEventListener('fetch', (e) => {
   const req = e.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== location.origin || isOcr(new URL(req.url))) return;
+  const url = new URL(req.url);
+  if (req.method !== 'GET' || url.origin !== location.origin || isOcr(url) || !req.url.startsWith(self.registration.scope)) return;
   e.respondWith(
-    fetch(req).then((res) => {
-      if (res.ok) caches.open(CACHE).then((c) => c.put(req, res.clone()));
-      return res.clone();
-    }).catch(() => caches.match(req, { ignoreSearch: true }).then((hit) => hit || caches.match('./index.html'))).then(isolated),
+    caches.open(CACHE).then((c) => c.match(req, { ignoreSearch: true }).then((hit) => hit || fetch(req).then((res) => {
+      if (res.ok) c.put(req, res.clone());
+      return res;
+    }).catch(() => c.match('./index.html')))).then(isolated),
   );
 });
