@@ -148,6 +148,64 @@ var SignCore = (function () {
     return { sig: sig, texts: [{ str: [name, date].filter(Boolean).join('   '), x: sig.x, y: by - 11, size: 9 }] };
   }
 
+  // A layout map sign-off (QCMS's form map; a sign pack's client_blocks hint): {sign, name?, date?, company?},
+  // boxes as fractions of the page from the top-left. The signature in its sign box; name, date and company in
+  // their own boxes when it has them (each drawn smaller to fit its box). A block with a date box but no name
+  // box (e.g. "Verified (QC)" over "Date :") gets the name small at the bottom right inside the sign box, the
+  // signature kept clear of it: below the box is that date line. No company: its box is left blank.
+  function layoutPlacement(s, box, name, date, company) {
+    name = String(name || ''); date = String(date || '');
+    var W = box.x1 - box.x0, H = box.y1 - box.y0;
+    var inside = !s.name && !!s.date && !!name.trim();
+    var p = boxPlacement(s.sign, box, s.name || inside ? '' : name, s.date ? '' : date);
+    var texts = p.texts.filter(function (t) { return t.str.trim(); });
+    var sig = p.sig;
+    if (inside) {
+      var bx = box.x0 + s.sign.x * W, bw = s.sign.w * W, by = box.y1 - (s.sign.y + s.sign.h) * H;
+      var nameW = Math.min(bw / 2, name.trim().length * INSIDE_NAME_SIZE * 0.52); // Helvetica, about half an em a letter
+      texts.push({ str: name.trim(), x: bx + bw - 4 - nameW, y: by + 3, size: INSIDE_NAME_SIZE });
+      sig = { x: sig.x, y: sig.y, h: sig.h, maxW: Math.max(40, sig.maxW - nameW - 6) };
+    }
+    [boxText(s.name, box, name), boxText(s.date, box, date), boxText(s.company, box, company)].forEach(function (t) { if (t) texts.push(t); });
+    return { sig: sig, texts: texts };
+  }
+
+  // A box given as fractions of the page from the top-left, in PDF units {x0, y0, x1, y1}.
+  function fracRect(c, box) {
+    var W = box.x1 - box.x0, H = box.y1 - box.y0;
+    var x0 = box.x0 + c.x * W, y1 = box.y1 - c.y * H;
+    return { x0: x0, y0: y1 - c.h * H, x1: x0 + c.w * W, y1: y1 };
+  }
+
+  // One client block of a form with several (a sign pack's client_blocks hint: {heading, optional, sign, ...}),
+  // as the text shows it: a block under its own heading whose signature area is near the mapped sign box, so
+  // one client block is never taken for another (e.g. "Test Witnessed By" for "Accepted for Client"). Every
+  // place the heading appears is tried, and every shape (labelled, boxed, inline) at each. Null when the text
+  // doesn't show it there: the map's own boxes are used instead.
+  function matchClientBlock(items, box, mapped, options) {
+    var head = norm(String((mapped && mapped.heading) || '').replace(/[\s:]+$/, '').trim());
+    if (!head || !mapped.sign) return null;
+    var o = opts({ headings: [head], fallback: [], inline: DEFAULTS.inline.concat([head]), labels: options && options.labels });
+    var r = fracRect(mapped.sign, box), pad = 30;
+    var anchors = headingAnchors(buildLines(items), head);
+    for (var ai = 0; ai < anchors.length; ai++) {
+      var a = anchors[ai];
+      var shapes = [labelledBlock(items, box, o, a), head !== 'client' ? boxedBlock(items, box, o, a) : null, inlineBlock(items, box, a)];
+      for (var k = 0; k < shapes.length; k++) {
+        var b = shapes[k];
+        if (!b) continue;
+        var s = b.area;
+        if (s.x0 < r.x1 + pad && s.x1 > r.x0 - pad && s.y0 < r.y1 + pad && s.y1 > r.y0 - pad) {
+          b.heading = head;
+          b.optional = !!mapped.optional;
+          b.anchor = { x: a.x, y: a.y };
+          return b;
+        }
+      }
+    }
+    return null;
+  }
+
   /* ---------- checklist rows (digital completion D-01, site mode) ---------- */
 
   // Column header words, lower case; a pack can add its own (options.headers). pass / fail / na are answer columns.
@@ -632,7 +690,10 @@ var SignCore = (function () {
   }
 
   // The QCMS entry in a sign pack's PDF info (JSON), or null.
-  // {v: 1, project_no, transmittal, pages: [null | {doc_no, rev, page, pages, client: {x, y, w, h}}]}
+  // {v: 1, project_no, transmittal, pages: [null | {doc_no, rev, page, pages, client_signoff, client: {x, y, w, h},
+  //   client_company, client_blocks: [{heading, optional, sign, name, date, company}]}]}
+  // client_blocks: a form with more than one client block (e.g. "Test Witnessed By" and "Accepted for Client"),
+  // each on its page from the form's map: the page signs each ticked one. Older packs have none.
   function parseQcms(str) {
     if (!str) return null;
     try {
@@ -1027,7 +1088,8 @@ var SignCore = (function () {
 
   return { DEFAULTS: DEFAULTS, KEYWORD: KEYWORD, NOTES_HEADING: NOTES_HEADING,
            textItems: textItems, buildLines: buildLines, findClientBlock: findClientBlock, placement: placement,
-           findCompanyBlock: findCompanyBlock, boxPlacement: boxPlacement,
+           findCompanyBlock: findCompanyBlock, boxPlacement: boxPlacement, layoutPlacement: layoutPlacement,
+           fracRect: fracRect, matchClientBlock: matchClientBlock,
            CHECK_HEADERS: CHECK_HEADERS, findChecklist: findChecklist, findContractorBlock: findContractorBlock, findTagsBox: findTagsBox,
            STAMP: STAMP, stampPlacement: stampPlacement, emptySpot: emptySpot, inkInBox: inkInBox, rightBorder: rightBorder, bottomBorder: bottomBorder, blank: blank,
            fitImage: fitImage, stampPdf: stampPdf, isSigned: isSigned, plainText: plainText,

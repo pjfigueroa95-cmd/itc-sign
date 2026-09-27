@@ -94,6 +94,9 @@
   .pnav .zoom { padding: 2px 10px; font-size: .82rem; }
   .card .how { margin: 6px 12px 0; font-size: .82rem; color: var(--muted); min-height: 1.2em; }
   .card .how button { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; text-decoration: underline; font-size: inherit; }
+  .card .blocks { margin: 6px 12px 0; display: grid; gap: 4px; font-size: .88rem; }
+  .card .blocks .check { color: var(--ink); font-size: inherit; }
+  .card .blocks .warnline { margin: 2px 0 0; color: var(--warn); font-size: .82rem; }
   .card footer { padding: 10px 12px 12px; display: grid; gap: 8px; margin-top: auto; }
   .card textarea { width: 100%; min-height: 54px; resize: vertical; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
   .card.cover { opacity: .8; }
@@ -477,7 +480,19 @@ async function analyse(file) {
       pg.signoff = (hint && hint.client_signoff) || null;
       // the client block's Company box (from the sender's form map): the client's company goes in it
       pg.companyBox = (hint && hint.client_company) || null;
-      if (pg.signoff !== 'none') {
+      // a form with more than one client block (the sender's form map, e.g. "Test Witnessed By" and
+      // "Accepted for Client"): each one on this page, signed where it is ticked
+      const mapped = hint && Array.isArray(hint.client_blocks) ? hint.client_blocks.filter((b) => b && b.sign) : [];
+      if (pg.signoff !== 'none' && mapped.length) {
+        pg.targets = [];
+        for (const m of mapped) {
+          const t = { map: m, heading: String(m.heading || 'client'), optional: !!m.optional, block: SignCore.matchClientBlock(items, box, m, findOpts), manual: null };
+          t.already = (t.block && t.block.already) || (await inkInArea(page, t.block || mappedBlock(t, box), items, pg.targets.length ? null : pg));
+          t.on = !t.optional && !t.already;
+          pg.targets.push(t);
+        }
+        pg.already = pg.targets.every((t) => t.already) ? pg.targets[0].already : null;
+      } else if (pg.signoff !== 'none') {
         pg.block = SignCore.findClientBlock(items, box, findOpts);
         if (pg.block) pg.already = pg.block.already || (await inkInArea(page, pg.block, items, pg));
         else if (hint && hint.client) pg.hint = hint;
@@ -487,9 +502,9 @@ async function analyse(file) {
     }
     file.marks = await bookmarks(pdf);
     file.hasText = file.pages.some((p) => p.hasText);
-    file.hasBlock = file.pages.some((p) => p.block || p.hint);
+    file.hasBlock = file.pages.some((p) => p.block || p.hint || p.targets);
     // a loose sheet whose every client block is signed already is left out; in a pack only its sheet is
-    const blocks = file.pages.filter((p) => p.block || p.hint);
+    const blocks = file.pages.filter((p) => p.block || p.hint || p.targets);
     const already = !qcms && blocks.length > 0 && blocks.every((p) => p.already);
     // "text but no block" only when every page has text: a scanned page may still hold a block
     const allText = file.pages.every((p) => p.hasText);
@@ -556,6 +571,12 @@ async function inkInArea(page, block, items, pg) {
   } catch (e) { if (pg) pg.ink = { error: String(e && e.message || e) }; return null; }
 }
 
+// A mapped client block the text doesn't show, as a block for inkInArea: its sign box.
+function mappedBlock(t, box) {
+  const sig = SignCore.layoutPlacement(t.map, box, '', '', '').sig;
+  return { kind: 'mapped', area: SignCore.fracRect(t.map.sign, box), sig: { ...sig } };
+}
+
 async function bookmarks(pdf) {
   const outline = await pdf.getOutline().catch(() => null);
   const marks = [];
@@ -585,6 +606,7 @@ function rebuild() {
       const st = state(group);
       group.ticked = !group.cover && (st === 'ready' || st === 'click' || st === 'reading' ||
         (!!f.forced && (st === 'already' || st === 'optional')));
+      if (group.ticked) ensureOn(group);
       group.collapsed = group.cover && !candidates(group).length;
       S.groups.push(group);
     }
@@ -640,8 +662,53 @@ function renderLeftOut() {
 // Pages of a group that have somewhere to sign.
 function candidates(g) { return g.pages.filter((p) => place(p)); }
 
+/* ---------- several client blocks on a sheet (a pack's client_blocks hint) ---------- */
+// A page's client blocks from the pack (not replaced by an added sign-off).
+const targetsOf = (pg) => (pg.targets && !pg.stamp ? pg.targets : null);
+// Every client block of a group's pages: [page, block].
+const groupTargets = (g) => g.pages.flatMap((p) => (targetsOf(p) || []).map((t) => [p, t]));
+
+// What to draw for one client block: found on the sheet under its heading, else in the sender's boxes; moved
+// where the client clicked; the client's company in its Company box.
+function targetPlace(pg, t) {
+  const name = nameText(), date = dateText();
+  let p = t.block ? SignCore.placement({ box: pg.box, auto: t.block }, name, date) : SignCore.layoutPlacement(t.map, pg.box, name, date, '');
+  if (t.manual) p = { sig: { x: t.manual.x, y: t.manual.y - p.sig.h / 2, h: p.sig.h, maxW: Math.max(40, pg.box.x1 - t.manual.x - 10) }, texts: p.texts };
+  return t.map.company ? SignCore.withCompanyBox(p, t.map.company, pg.box, S.company) : p;
+}
+
+// Everything signed on a page: each ticked client block, else the page's one placement.
+function signPlaces(pg) {
+  const ts = targetsOf(pg);
+  if (ts) return ts.filter((t) => t.on).map((t) => targetPlace(pg, t));
+  const p = place(pg);
+  return p ? [p] : [];
+}
+const hasPlaces = (g) => g.pages.some((p) => signPlaces(p).length);
+
+// A group ticked with none of its client blocks ticked: the ones not signed yet that must be signed, else
+// every one not signed yet, else all.
+function ensureOn(g) {
+  const ts = groupTargets(g).map(([, t]) => t);
+  if (!ts.length || ts.some((t) => t.on)) return;
+  let pick = ts.filter((t) => !t.already && !t.optional);
+  if (!pick.length) pick = ts.filter((t) => !t.already);
+  if (!pick.length) pick = ts;
+  pick.forEach((t) => { t.on = true; });
+}
+
+// Only optional client positions on the page (a block signed already doesn't count).
+function pageOptional(p) {
+  const ts = targetsOf(p);
+  if (ts) return ts.filter((t) => !t.already).every((t) => t.optional);
+  return !!(p.block || p.ocr || {}).optional;
+}
+
+const titled = (s) => String(s).replace(/[\s:]+$/, '').toLowerCase().replace(/(^|[\s/(-])([a-z])/g, (m, a, b) => a + b.toUpperCase());
+
 function method(pg) {
   if (pg.stamp) return pg.stamp.clicked ? 'stampClick' : 'stamp';
+  if (targetsOf(pg)) return pg.targets.some((t) => t.manual) ? 'click' : pg.targets.some((t) => t.block) ? 'text' : 'hint';
   if (pg.manual) return pg.copied ? 'copied' : 'click';
   if (pg.block) return 'text';
   if (pg.hint) return 'hint';
@@ -659,14 +726,16 @@ const METHOD = {
 };
 
 // What to draw on a page, or null: with the client's company in the block's Company box when the pack says where it is.
+// A page with several client blocks: the first ticked one (signPlaces gives them all).
 function place(pg) {
   const p = placeOnly(pg);
-  return pg.stamp || !pg.companyBox ? p : SignCore.withCompanyBox(p, pg.companyBox, pg.box, S.company);
+  return pg.stamp || pg.targets || !pg.companyBox ? p : SignCore.withCompanyBox(p, pg.companyBox, pg.box, S.company);
 }
 
 function placeOnly(pg) {
   const name = nameText(), date = dateText();
   if (pg.stamp) return SignCore.stampPlacement(pg.stamp, pg.box, name, date);
+  if (pg.targets) return targetPlace(pg, pg.targets.find((t) => t.on) || pg.targets[0]);
   if (pg.manual) return SignCore.placement({ box: pg.box, auto: pg.block || pg.ocr, manual: pg.manual }, name, date);
   if (pg.block) return SignCore.placement({ box: pg.box, auto: pg.block }, name, date);
   if (pg.hint) return SignCore.hintPlacement(pg.hint, pg.box, name, date);
@@ -681,7 +750,7 @@ function state(g) {
   if (c.length) {
     if (c.some(byClient)) return 'ready';
     if (c.every((p) => p.already)) return 'already';
-    if (c.every((p) => (p.block || p.ocr || {}).optional)) return 'optional';
+    if (c.every(pageOptional)) return 'optional';
     return 'ready';
   }
   if (g.ocrPending) return 'reading';
@@ -706,6 +775,7 @@ function renderCards() {
       <div class="sheet"><div class="loading">Loading…</div><canvas class="pdf"></canvas><canvas class="ov"></canvas></div>
       <div class="pnav"><span class="pages"><button class="btn prev" type="button" aria-label="Previous page">‹</button><span class="pno"></span><button class="btn next" type="button" aria-label="Next page">›</button></span><button class="btn zoom" type="button"></button></div>
       <p class="how"></p>
+      <div class="blocks hidden"></div>
       <footer>
         <button class="btn primary sign" type="button">Sign</button>
         <textarea class="note hidden" placeholder="Note for the sender (optional), e.g. item 7 needs a photo"></textarea>
@@ -720,6 +790,8 @@ function renderCards() {
       g.ticked = q('.tick').checked;
       g.touched = true;
       if (!g.ticked) g.signed = false;
+      else ensureOn(g);
+      drawOverlay(g);
       updateCard(g); refresh();
       if (!g.ticked) q('.note').focus();
     });
@@ -765,12 +837,17 @@ function updateCard(g) {
     b.addEventListener('click', fn);
     how.append(b);
   };
+  const ts = targetsOf(pg);
   if (st === 'already' && pg.already) {
     how.textContent = pg.already + (g.ticked ? '. Ticked, so it will be signed again. ' : '. Tick it to sign it anyway. ');
   } else if (st === 'optional' && place(pg)) {
-    const head = (pg.block || pg.ocr).heading;
-    how.textContent = 'Optional client position ("' + head.replace(/\b\w/g, (c) => c.toUpperCase()) + '"). ' +
+    const head = ts ? (ts.find((t) => t.optional && !t.already) || ts[0]).heading : (pg.block || pg.ocr).heading;
+    how.textContent = 'Optional client position ("' + titled(head) + '"). ' +
       (g.ticked ? 'Ticked, so it will be signed. ' : 'Tick it if you need to sign here. ');
+  } else if (ts) {
+    how.textContent = METHOD[m][2] + (ts.length > 1 ? ' ' + ts.length + ' client sign-offs on this sheet: each one ticked below is signed.' : '') +
+      ' Click on the sheet to move the nearest one. ';
+    if (ts.some((t) => t.manual)) button('Put it back', () => { ts.forEach((t) => { t.manual = null; }); afterPlace(g); renderSheet(g); });
   } else if (m) {
     how.textContent = METHOD[m][2] + ' Click on the sheet to move it. ';
     if (pg.stamp) button('Remove', () => { pg.stamp = null; afterPlace(g); renderSheet(g); });
@@ -786,6 +863,7 @@ function updateCard(g) {
     how.textContent = 'This sheet has no client sign-off block, so it is left unsigned. ';
     button('Add client sign-off', () => addSignoff(g));
   }
+  renderBlocks(g);
   q('.sheet').classList.toggle('hidden', !!g.collapsed);
   const zb = q('.zoom');
   zb.textContent = g.collapsed ? 'Show sheet' : g.zoom ? 'Whole sheet' : 'Zoom to signature';
@@ -802,6 +880,45 @@ function updateCard(g) {
   if (note.value !== g.note) note.value = g.note;
 }
 
+// A sheet with several client blocks: a tick for each (sign all of them, or only some; optional ones start unticked).
+function renderBlocks(g) {
+  const el = g.el.querySelector('.blocks');
+  const all = groupTargets(g);
+  el.classList.toggle('hidden', all.length < 2);
+  el.textContent = '';
+  if (all.length < 2) return;
+  const pages = new Set(all.map(([p]) => p)).size;
+  for (const [p, t] of all) {
+    const label = document.createElement('label');
+    label.className = 'check';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = !!t.on;
+    const bits = [titled(t.heading)];
+    if (t.optional) bits.push('optional');
+    if (t.already) bits.push('signed already');
+    if (pages > 1) bits.push('page ' + (g.pages.indexOf(p) + 1));
+    cb.setAttribute('aria-label', 'Sign ' + bits[0]);
+    cb.addEventListener('change', () => {
+      t.on = cb.checked;
+      if (t.on && !g.ticked) { g.ticked = true; g.touched = true; g.el.querySelector('.tick').checked = true; }
+      if (g.signed) S.downloaded = false;
+      if (t.on && p !== g.pages[g.shown]) { g.shown = g.pages.indexOf(p); renderSheet(g); }
+      drawOverlay(g); updateCard(g); refresh();
+    });
+    const span = document.createElement('span');
+    span.textContent = bits[0] + (bits.length > 1 ? ' (' + bits.slice(1).join(', ') + ')' : '');
+    label.append(cb, span);
+    el.append(label);
+  }
+  const must = all.filter(([, t]) => !t.optional && !t.already && !t.on);
+  if (g.ticked && must.length) {
+    const w = document.createElement('p');
+    w.className = 'warnline';
+    w.textContent = 'Not signing ' + must.map(([, t]) => titled(t.heading)).join(', ') + ': the sender will see this sheet as not fully signed.';
+    el.append(w);
+  }
+}
+
 /* ---------- drawing a sheet ---------- */
 let renderChain = Promise.resolve();
 function renderSheet(g) {
@@ -816,17 +933,23 @@ async function doRender(g) {
   const canvas = g.el.querySelector('.pdf'), ov = g.el.querySelector('.ov');
   const page = await pg.file.pdf.getPage(pg.index + 1);
   const base = page.getViewport({ scale: 1 });
-  // Zoomed: a window around the signature (ZOOM_W x ZOOM_H of the page), else the whole sheet.
-  const pl = g.zoom ? place(pg) : null;
-  const cw = pl ? base.width * ZOOM_W : base.width, ch = pl ? base.height * ZOOM_H : base.height;
+  // Zoomed: a window around the signature (ZOOM_W x ZOOM_H of the page, or around every client block of the
+  // page when it has several), else the whole sheet.
+  const ts = targetsOf(pg);
+  const pls = !g.zoom ? [] : ts ? ts.map((t) => targetPlace(pg, t)) : [place(pg)].filter(Boolean);
+  const sx0 = Math.min(...pls.map((p) => p.sig.x)), sx1 = Math.max(...pls.map((p) => p.sig.x + Math.min(p.sig.maxW, p.sig.h * 3.5)));
+  const sy0 = Math.min(...pls.map((p) => p.sig.y)), sy1 = Math.max(...pls.map((p) => p.sig.y + p.sig.h));
+  const many = pls.length > 1;
+  const cw = !pls.length ? base.width : Math.min(base.width, Math.max(base.width * ZOOM_W, many ? sx1 - sx0 + 80 : 0));
+  const ch = !pls.length ? base.height : Math.min(base.height, Math.max(base.height * ZOOM_H, many ? sy1 - sy0 + 90 : 0));
   sheet.style.aspectRatio = cw + ' / ' + ch;
   const cssW = sheet.clientWidth || 400;
   const scale = (cssW * Math.min(2, window.devicePixelRatio || 1)) / cw;
   let vp = page.getViewport({ scale });
-  if (pl) {
-    const c = vp.convertToViewportPoint(pl.sig.x + Math.min(pl.sig.maxW, pl.sig.h * 3.5) / 2, pl.sig.y);
+  if (pls.length) {
+    const c = vp.convertToViewportPoint((sx0 + sx1) / 2, many ? (sy0 + sy1) / 2 : sy0);
     const left = Math.max(0, Math.min(vp.width - cw * scale, c[0] - cw * scale / 2));
-    const top = Math.max(0, Math.min(vp.height - ch * scale, c[1] - ch * scale * 0.45));
+    const top = Math.max(0, Math.min(vp.height - ch * scale, c[1] - ch * scale * (many ? 0.5 : 0.45)));
     vp = page.getViewport({ scale, offsetX: -left, offsetY: -top });
   }
   canvas.width = ov.width = Math.round(cw * scale);
@@ -844,9 +967,29 @@ function drawOverlay(g) {
   if (!ov || !g.vp || g.vpPage !== g.shown) return;
   const ctx = ov.getContext('2d'), vp = g.vp;
   ctx.clearRect(0, 0, ov.width, ov.height);
-  const pg = g.pages[g.shown], pl = place(pg);
-  if (!pl) return;
-  ctx.globalAlpha = g.signed ? 1 : g.ticked ? 0.55 : 0.25;
+  const pg = g.pages[g.shown], ts = targetsOf(pg);
+  // several client blocks: the ticked ones as they will be signed, the others as an outline
+  const on = ts ? signPlaces(pg) : [place(pg)].filter(Boolean);
+  for (const t of ts ? ts.filter((x) => !x.on) : []) drawPlace(ctx, vp, targetPlace(pg, t), 0.4, titled(t.heading) + ': not ticked');
+  for (const pl of on) drawPlace(ctx, vp, pl, g.signed ? 1 : g.ticked ? 0.55 : 0.25);
+  ctx.globalAlpha = 1;
+}
+
+// One placement on the overlay: the signature (or its box before there is one) and its texts; `outline`: only
+// a dashed box with that label, for a client block not ticked.
+function drawPlace(ctx, vp, pl, alpha, outline) {
+  ctx.globalAlpha = alpha;
+  if (outline) {
+    const r = { x: pl.sig.x, y: pl.sig.y, w: Math.min(pl.sig.maxW, pl.sig.h * 3.5), h: pl.sig.h };
+    const a = vp.convertToViewportPoint(r.x, r.y), b = vp.convertToViewportPoint(r.x + r.w, r.y + r.h);
+    const x = Math.min(a[0], b[0]), y = Math.min(a[1], b[1]), w = Math.abs(b[0] - a[0]), h = Math.abs(b[1] - a[1]);
+    ctx.setLineDash([4, 4]); ctx.strokeStyle = '#7a8190'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(x, y, w, h);
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#5d6577'; ctx.font = Math.max(9, Math.min(14, h * 0.35)) + 'px sans-serif';
+    ctx.fillText(outline, x + 4, y + h * 0.6, w - 8);
+    return;
+  }
   if (pl.frame) {
     const f = pl.frame, a = vp.convertToViewportPoint(f.x, f.y), b = vp.convertToViewportPoint(f.x + f.w, f.y + f.h);
     ctx.setLineDash([]); ctx.strokeStyle = '#14205a'; ctx.lineWidth = Math.max(1, 0.6 * vp.scale);
@@ -892,6 +1035,21 @@ function clickPlace(g, e) {
     g.el.querySelector('.tick').checked = true;
     afterPlace(g);
     renderSheet(g);
+    return;
+  }
+  // several client blocks: the click moves the nearest one (and ticks it)
+  const ts = targetsOf(pg);
+  if (ts) {
+    let best = ts[0], dist = Infinity;
+    for (const t of ts) {
+      const s = targetPlace(pg, t).sig;
+      const d = Math.hypot(x - (s.x + Math.min(s.maxW, s.h * 3.5) / 2), y - (s.y + s.h / 2));
+      if (d < dist) { dist = d; best = t; }
+    }
+    best.manual = { x, y }; best.on = true;
+    g.ticked = true;
+    g.el.querySelector('.tick').checked = true;
+    afterPlace(g);
     return;
   }
   pg.manual = { x, y }; pg.copied = false;
@@ -952,6 +1110,7 @@ function signOne(g) {
   else {
     if (!canSign(true)) return;
     if (!candidates(g).length) { say('Click on the sheet where your signature goes, then press Sign.', 'warn'); return; }
+    if (!hasPlaces(g)) { say('Tick at least one client sign-off on this sheet, then press Sign.', 'warn'); return; }
     g.signed = true;
     say('');
   }
@@ -961,16 +1120,19 @@ function signOne(g) {
 $('sign-all').addEventListener('click', () => {
   if (!canSign(true)) return;
   let n = 0;
-  const waiting = [];
+  const waiting = [], noBlock = [];
   for (const g of S.groups) {
     if (!g.ticked || g.signed) continue;
-    if (candidates(g).length) { g.signed = true; n++; drawOverlay(g); updateCard(g); }
+    if (hasPlaces(g)) { g.signed = true; n++; drawOverlay(g); updateCard(g); }
+    else if (candidates(g).length) noBlock.push(g);
     else waiting.push(g);
   }
   S.downloaded = S.downloaded && n === 0;
-  if (waiting.length) {
-    say(`Signed ${n}. ${waiting.length} ticked ${waiting.length === 1 ? 'sheet needs' : 'sheets need'} a click to place the signature first.`, 'warn');
-    waiting[0].el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  if (waiting.length || noBlock.length) {
+    const why = [waiting.length ? `${waiting.length} ticked ${waiting.length === 1 ? 'sheet needs' : 'sheets need'} a click to place the signature first` : '',
+      noBlock.length ? `${noBlock.length} ticked ${noBlock.length === 1 ? 'sheet has' : 'sheets have'} none of their client sign-offs ticked` : ''].filter(Boolean).join('; ');
+    say(`Signed ${n}. ${why}.`, 'warn');
+    (waiting[0] || noBlock[0]).el.scrollIntoView({ block: 'center', behavior: 'smooth' });
   } else say(n ? `Signed ${n}. Check them, then download.` : 'Everything ticked is already signed.', 'ok');
   refresh();
 });
@@ -999,8 +1161,7 @@ $('download').addEventListener('click', async () => {
     }
     const pages = [];
     for (const g of signed) for (const pg of g.pages) {
-      const pl = place(pg);
-      if (pl) pages.push({ index: offset.get(pg.file) + pg.index, place: pl });
+      for (const pl of signPlaces(pg)) pages.push({ index: offset.get(pg.file) + pg.index, place: pl });
     }
     if (pages.length) bytes = await SignCore.stampPdf(PDFLib, bytes, pages, S.sig.png, { name: nameText(), date: dateText() });
     if (notes.length) bytes = await SignCore.addNotesPage(PDFLib, bytes, notes, { name: nameText(), date: dateText() });
