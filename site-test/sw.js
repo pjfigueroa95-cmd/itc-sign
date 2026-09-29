@@ -8,7 +8,7 @@
 // (…/site-test/), from the same build. Cache Storage is shared by the whole site, so each copy names its caches
 // apart and only ever deletes its own: the live copy's are qcms-site-<build> and qcms-ocr-<version> (the names
 // it always had), the test copy's qcms-site-test-<build> and qcms-ocr-test-<version>.
-const BUILD = '20260929034415052';
+const BUILD = '20260929052305296';
 const TEST = /\/site-test\/$/.test(new URL(self.registration.scope).pathname);
 const CACHE = `qcms-site-${TEST ? 'test-' : ''}${BUILD}`;
 const FILES = ['./', './index.html', './manifest.webmanifest', './manifest-test.webmanifest', './icon-192.png', './icon-512.png'];
