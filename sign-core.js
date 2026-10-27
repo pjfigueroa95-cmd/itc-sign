@@ -597,6 +597,305 @@ var SignCore = (function () {
     return { count: count, ratio: ratio, inked: count >= 40 && ratio >= 0.004 };
   }
 
+  /* ---------- client blocks found on a picture (a scan or image-only sheet: no words, no hints) ---------- */
+  // Ported by hand from QC Suite's signing page (its sign-core's alignRows, inkIn): a sign-off block is a heading's
+  // tinted band ("Contractor Representative | Client Representative") over rows, each row's foot a ruled line (the
+  // line written on, or a cell's border). The page draws the sheet (look), finds the bands and ruled lines here
+  // (pictureRows), reads only the headings and labels with OCR, and pictureClientBlock picks the client's column and
+  // gives each piece its own box (sign, name, date, company) as a layout map does.
+  //
+  // look: the page drawn for looking at: { data (RGBA), w, h, scale (pixels a point), x0, y1 (its top-left corner in
+  // the page's units, y up) }. Rectangles below are in the page's units, y up.
+
+  var DARK = 160;
+  // Runs along one pixel row where test(lum) holds, gaps of up to `gap` pixels bridged: [[start, end), ...]
+  function rowRuns(look, y, test, gap) {
+    var out = [], s = -1, last = -1;
+    for (var x = 0; x <= look.w; x++) {
+      var on = x < look.w && test(lum(look.data, (y * look.w + x) * 4));
+      if (on) { if (s < 0) s = x; last = x; }
+      else if (s >= 0 && x - last > gap) { out.push([s, last + 1]); s = -1; }
+    }
+    return out;
+  }
+  var px2x = function (look, px) { return look.x0 + px / look.scale; };
+  var py2y = function (look, py) { return look.y1 - py / look.scale; };
+
+  // The paper's own brightness: the commonest brightness of the light pixels (white paper about 255; a grey scan's
+  // paper darker, about 215 to 235), so a tint is told from the paper of the sheet it is on.
+  function paperLevel(look) {
+    var hist = new Uint32Array(256), n = look.w * look.h;
+    for (var i = 0; i < n; i += 3) hist[Math.round(lum(look.data, i * 4))]++;
+    var best = 255;
+    for (var v = 150; v < 256; v++) if (hist[v] > hist[best]) best = v;
+    return best;
+  }
+
+  // Heading bands: rows of a light tint (a colour, or the grey a scan makes of it; darker than the paper) at least a
+  // fifth of the page wide, 6 to 40 points tall. [{ top, bottom, x0, x1 }]
+  function headingBands(look) {
+    var minW = look.w * 0.2, rows = [], paper = Math.min(245, paperLevel(look) - 9);
+    for (var y = 0; y < look.h; y++) {
+      var seg = null;
+      rowRuns(look, y, function (l) { return l < paper; }, 2).forEach(function (r) {
+        if (r[1] - r[0] < minW) return;
+        var n = 0;
+        for (var x = r[0]; x < r[1]; x++) if (lum(look.data, (y * look.w + x) * 4) >= DARK) n++;
+        if (n >= 0.6 * (r[1] - r[0]) && (!seg || r[1] - r[0] > seg[1] - seg[0])) seg = r;
+      });
+      rows.push(seg);
+    }
+    var bands = [], cur = null;
+    for (var yy = 0; yy <= look.h; yy++) {
+      var s = yy < look.h ? rows[yy] : null;
+      if (s && cur && s[0] < cur.c1 && s[1] > cur.c0) { cur.end = yy; cur.c0 = Math.min(cur.c0, s[0]); cur.c1 = Math.max(cur.c1, s[1]); continue; }
+      if (cur) {
+        var hpt = (cur.end - cur.start + 1) / look.scale;
+        if (hpt >= 6 && hpt <= 40) bands.push({ top: py2y(look, cur.start), bottom: py2y(look, cur.end + 1), x0: px2x(look, cur.c0), x1: px2x(look, cur.c1) });
+      }
+      cur = s ? { start: yy, end: yy, c0: s[0], c1: s[1] } : null;
+    }
+    return bands;
+  }
+
+  // Ruled lines: dark runs at least 40 points long and at most 4 points thick (runs on neighbouring pixel rows that
+  // overlap are one line, so a scan turned a little still gives one). [{ y, x0, x1 }]
+  function ruledLines(look) {
+    var minW = 40 * look.scale, open = [], done = [];
+    for (var y = 0; y <= look.h; y++) {
+      var runs = y < look.h ? rowRuns(look, y, function (l) { return l < DARK; }, 2).filter(function (r) { return r[1] - r[0] >= minW; }) : [];
+      var next = [];
+      runs.forEach(function (r) {
+        var l = open.filter(function (o) { return o.last >= y - 2 && r[0] < o.c1 && r[1] > o.c0; })[0];
+        if (l) { l.last = y; l.c0 = Math.min(l.c0, r[0]); l.c1 = Math.max(l.c1, r[1]); l.ys += y; l.n++; }
+        else { l = { first: y, last: y, c0: r[0], c1: r[1], ys: y, n: 1 }; open.push(l); }
+        if (next.indexOf(l) < 0) next.push(l);
+      });
+      open = open.filter(function (o) {
+        if (o.last >= y - 2 && y < look.h) return true;
+        done.push(o);
+        return false;
+      });
+    }
+    return done.filter(function (o) { return (o.last - o.first + 1) / look.scale <= 4; })
+      .map(function (o) { return { y: py2y(look, o.ys / o.n + 0.5), x0: px2x(look, o.c0), x1: px2x(look, o.c1) }; });
+  }
+
+  // Where a row's label ends (the page's units): a label cell's border (dark down most of the row, in the left half,
+  // past the row's own left border), else the first stretch of 12 points with nothing dark after something dark (the
+  // label's words); the row's left when nothing dark is in its first 40 per cent.
+  function labelEnd(look, x0, x1, y0, y1) {
+    var c0 = Math.max(0, Math.round((x0 - look.x0) * look.scale)), c1 = Math.min(look.w, Math.round((x1 - look.x0) * look.scale));
+    var r0 = Math.max(0, Math.round((look.y1 - y1) * look.scale) + 2), r1 = Math.min(look.h, Math.round((look.y1 - y0) * look.scale) - 2);
+    if (r1 - r0 < 3 || c1 - c0 < 8) return x0;
+    var n = [];
+    for (var x = c0; x < c1; x++) {
+      var k = 0;
+      for (var y = r0; y < r1; y++) if (lum(look.data, (y * look.w + x) * 4) < DARK) k++;
+      n.push(k);
+    }
+    var border = function (i) { return n[i] >= 0.7 * (r1 - r0); };
+    for (var i = Math.round(6 * look.scale); i < n.length / 2; i++) if (border(i)) return px2x(look, c0 + i + 2);
+    var clear = 12 * look.scale, seen = false, gap = 0;
+    for (var j = 0; j < n.length; j++) {
+      if (n[j] && !border(j)) { seen = true; gap = 0; }
+      else if (seen && ++gap >= clear) return px2x(look, c0 + j - gap + 3 * look.scale);
+      if (!seen && j > 0.4 * n.length) return x0;
+    }
+    return x0;
+  }
+
+  // A column's parties side by side, [{ x0, x1 }] (the page's units): the cell borders inside it (dark down at least 70
+  // per cent of every row, away from its ends) are a label's and its value's; three or more (an odd count: label | value
+  // | label | value) split it at every second one. Otherwise the column is one party.
+  function partyCuts(look, x0, x1, spans) {
+    var whole = [{ x0: x0, x1: x1 }];
+    if (spans.length < 2) return whole;
+    var c0 = Math.max(0, Math.round((x0 - look.x0 + 4) * look.scale)), c1 = Math.min(look.w, Math.round((x1 - look.x0 - 4) * look.scale));
+    var rows = spans.map(function (sp) {
+      return [Math.max(0, Math.round((look.y1 - sp.top) * look.scale) + 2), Math.min(look.h, Math.round((look.y1 - sp.foot) * look.scale) - 2)];
+    }).filter(function (r) { return r[1] - r[0] >= 3; });
+    var xs = [], run = null;
+    for (var x = c0; x < c1; x++) {
+      var down = rows.length > 0 && rows.every(function (r) {
+        var k = 0;
+        for (var y = r[0]; y < r[1]; y++) if (lum(look.data, (y * look.w + x) * 4) < DARK) k++;
+        return k >= 0.7 * (r[1] - r[0]);
+      });
+      if (down) run = run ? [run[0], x] : [x, x];
+      else if (run) { xs.push(px2x(look, (run[0] + run[1]) / 2)); run = null; }
+    }
+    if (run) xs.push(px2x(look, (run[0] + run[1]) / 2));
+    if (xs.length < 3 || xs.length % 2 === 0) return whole;
+    var out = [], from = x0;
+    for (var i = 1; i < xs.length; i += 2) { out.push({ x0: from, x1: xs[i] - 1, label: xs[i - 1] }); from = xs[i] + 1; }
+    out.push({ x0: from, x1: x1, label: xs[xs.length - 1] });
+    // only parties alike: widths within a quarter of each other, each label cell narrower than its value cell (a
+    // checklist's columns, item | description | done | remarks, are not)
+    var ws = out.map(function (o) { return o.x1 - o.x0; });
+    var alike = Math.min.apply(null, ws) >= 0.75 * Math.max.apply(null, ws) &&
+      out.every(function (o) { return o.label - o.x0 < o.x1 - o.label; });
+    return alike ? out.map(function (o) { return { x0: o.x0, x1: o.x1 }; }) : whole;
+  }
+
+  // Ready for OCR: a strip of the sheet in plain black and white (a tint, a scan's grey paper gone) with its ruled
+  // lines taken out (long dark runs across or down), so a heading in a bordered, tinted cell reads like plain words.
+  // rgba: the strip drawn at `scale` pixels a point (w x h); changed in place.
+  function cleanForOcr(rgba, w, h, scale) {
+    var dark = new Uint8Array(w * h);
+    for (var i = 0; i < w * h; i++) if (lum(rgba, i * 4) < DARK) dark[i] = 1;
+    var keep = dark.slice(), across = Math.round(30 * scale), down = Math.round(14 * scale);
+    for (var y = 0; y < h; y++) for (var x = 0; x < w;) {
+      if (!dark[y * w + x]) { x++; continue; }
+      var s = x; while (x < w && dark[y * w + x]) x++;
+      if (x - s >= across) for (var k = s; k < x; k++) keep[y * w + k] = 0;
+    }
+    for (var cx = 0; cx < w; cx++) for (var cy = 0; cy < h;) {
+      if (!dark[cy * w + cx]) { cy++; continue; }
+      var t = cy; while (cy < h && dark[cy * w + cx]) cy++;
+      if (cy - t >= down) for (var j = t; j < cy; j++) keep[j * w + cx] = 0;
+    }
+    for (var p = 0; p < w * h; p++) {
+      var v = keep[p] ? 0 : 255;
+      rgba[p * 4] = rgba[p * 4 + 1] = rgba[p * 4 + 2] = v; rgba[p * 4 + 3] = 255;
+    }
+    return rgba;
+  }
+
+  // The sign-off blocks drawn on a sheet: each heading band with the ruled rows under it (within 160 points, above the
+  // next band), in columns side by side. [{ band, cols: [{ head, x0, x1, rows: [{ box, label }] }] }], rectangles
+  // { x0, y0, x1, y1 } in the page's units. A band with no rows under it is not a block.
+  function pictureRows(look) {
+    if (!look || !look.data) return [];
+    var bands = headingBands(look), lines = ruledLines(look), out = [];
+    bands.forEach(function (b) {
+      var below = bands.filter(function (o) { return o !== b && o.top < b.bottom - 2; }).reduce(function (m, o) { return Math.max(m, o.top); }, -Infinity);
+      var mine = lines.filter(function (l) {
+        return l.y < b.bottom - 3 && l.y > b.bottom - 160 && l.y > below + 3 && l.x0 >= b.x0 - 6 && l.x1 <= b.x1 + 6;
+      });
+      // columns: lines whose spans overlap by most of the shorter one
+      var cols = [];
+      mine.sort(function (p, q) { return p.x0 - q.x0; }).forEach(function (l) {
+        var c = cols.filter(function (k) { return Math.min(k.x1, l.x1) - Math.max(k.x0, l.x0) > 0.6 * Math.min(k.x1 - k.x0, l.x1 - l.x0); })[0];
+        if (c) { c.lines.push(l); c.x0 = Math.min(c.x0, l.x0); c.x1 = Math.max(c.x1, l.x1); }
+        else cols.push({ x0: l.x0, x1: l.x1, lines: [l] });
+      });
+      cols = cols.filter(function (c) { return c.lines.length >= 2 || cols.length === 1; }).sort(function (p, q) { return p.x0 - q.x0; });
+      var made = [];
+      cols.forEach(function (c, ci) {
+        var left = ci === 0 ? b.x0 : cols[ci - 1].x1 + 1, right = ci === cols.length - 1 ? Math.max(c.x1, b.x1) : c.x1;
+        // rows from the band down, line by line; a gap of more than 50 points ends the block
+        var ls = c.lines.sort(function (p, q) { return q.y - p.y; }), spans = [], top = b.bottom;
+        for (var i = 0; i < ls.length && spans.length < 6; i++) {
+          if (top - ls[i].y < 6) { top = ls[i].y; continue; } // a doubled line, or the band's own border
+          if (top - ls[i].y > 50) break;
+          spans.push({ top: top, foot: ls[i].y, x0: ls[i].x0 });
+          top = ls[i].y;
+        }
+        // a ruled table whose row lines run on across the parties side by side (label | value | label | value): split
+        // at every second cell border that runs down all its rows
+        partyCuts(look, c.x0, c.x1, spans).forEach(function (p, pi, all) {
+          var pl = pi === 0 ? left : p.x0, pr = pi === all.length - 1 ? right : p.x1, rows = [];
+          spans.forEach(function (sp) {
+            var end = labelEnd(look, pl, p.x1, sp.foot + 1, sp.top - 1), vx0 = Math.max(sp.x0, end);
+            if (p.x1 - vx0 < 40) return;
+            rows.push({ box: { x0: vx0, y0: sp.foot + 1, x1: p.x1, y1: sp.top - 1 }, label: { x0: pl, y0: sp.foot + 1, x1: vx0, y1: sp.top - 1 } });
+          });
+          if (rows.length >= 2) made.push({ head: { x0: pl, y0: b.bottom, x1: pr, y1: b.top }, x0: pl, x1: p.x1, rows: rows });
+        });
+      });
+      if (made.length) out.push({ band: b, cols: made });
+    });
+    return out;
+  }
+
+  // The words read (OCR items, in the page's units) whose middle is in a rectangle, as one lower-case line.
+  function wordsInRect(words, r) {
+    return norm((words || []).filter(function (i) {
+      var mx = i.x + (i.w || 0) / 2, my = i.y + (i.h || 0) * 0.35;
+      return String(i.str || '').trim() && mx > r.x0 - 2 && mx < r.x1 + 2 && my > r.y0 - 2 && my < r.y1 + 2;
+    }).sort(function (a, b) { return b.y - a.y || a.x - b.x; }).map(function (i) { return i.str; }).join(' ')).replace(/\s+/g, ' ').trim();
+  }
+  function headingOf(text, list) {
+    var t = ' ' + text.replace(/[^a-z' ]+/g, ' ').replace(/\s+/g, ' ') + ' ';
+    for (var i = 0; i < list.length; i++) if (t.indexOf(' ' + list[i] + ' ') >= 0) return list[i];
+    return null;
+  }
+  var ROW_ORDER = { 2: ['sign', 'date'], 3: ['sign', 'name', 'date'], 4: ['sign', 'name', 'company', 'date'] };
+  var LABEL_KEY = { signature: 'sign', name: 'name', date: 'date', company: 'company' };
+
+  // The client's block among the blocks pictureRows found, from the words read on them (words: OCR items in the
+  // page's units; none when the page couldn't read): the column under a client heading (options.headings first, then
+  // the usual ones); where no client heading is read, of two columns side by side the one that isn't the company's (the
+  // right one when neither is: guess, said on the card). Each row's piece from its label (Signature, Name, Date,
+  // Company), else by its place (Signature, Name, Company, Date for four rows). Null when none is the client's.
+  // Result: a layout map's block { heading, sign, name?, date?, company?, guess } (boxes as fractions of the page;
+  // guess false, or 'left' / 'right': the column taken without a client heading read).
+  function pictureClientBlock(found, words, box, options) {
+    var o = opts(options), company = DEFAULTS.company.map(norm);
+    var pick = null;
+    (found || []).forEach(function (f) {
+      if (pick && !pick.guess) return;
+      var heads = f.cols.map(function (c) {
+        var t = wordsInRect(words, c.head);
+        return { col: c, text: t, client: headingOf(t, o.headings), company: headingOf(t, company) };
+      });
+      var client = heads.filter(function (h) { return h.client && !h.company; })[0] || heads.filter(function (h) { return h.client; })[0];
+      if (client) { pick = { col: client.col, heading: client.client, guess: false }; return; }
+      if (pick || heads.length !== 2) return;
+      // (a heading read as nonsense counts as not read)
+      var other = heads.filter(function (h) { return !h.company; });
+      // guess: which of the two it is ('left' or 'right'), so the card names the one to check
+      if (other.length === 1) pick = { col: other[0].col, heading: 'client', guess: other[0] === heads[0] ? 'left' : 'right' };
+      else if (other.length === 2) pick = { col: heads[1].col, heading: 'client', guess: 'right' };
+    });
+    if (!pick) return null;
+    var rows = pick.col.rows, keys = rows.map(function (r) {
+      var t = wordsInRect(words, r.label).replace(/[^a-z ]+/g, ' ').trim();
+      var hit = null;
+      Object.keys(LABEL_KEY).forEach(function (k) {
+        if (!hit && (o.labels[k] || []).some(function (w) { return t === w || t.indexOf(w + ' ') === 0 || t.slice(-w.length - 1) === ' ' + w; })) hit = LABEL_KEY[k];
+      });
+      return hit;
+    });
+    var order = ROW_ORDER[Math.min(4, rows.length)] || ROW_ORDER[4];
+    if (keys.some(function (k) { return !k; })) {
+      // labels not read: by place, unless what was read says otherwise
+      var unread = order.filter(function (k) { return keys.indexOf(k) < 0; });
+      keys = keys.map(function (k) { return k || unread.shift() || null; });
+    }
+    var W = box.x1 - box.x0, H = box.y1 - box.y0, m = { heading: pick.heading, guess: pick.guess };
+    rows.forEach(function (r, i) {
+      var k = keys[i];
+      if (!k || m[k]) return;
+      m[k] = { x: (r.box.x0 - box.x0) / W, y: (box.y1 - r.box.y1) / H, w: (r.box.x1 - r.box.x0) / W, h: (r.box.y1 - r.box.y0) / H };
+    });
+    return m.sign ? m : null;
+  }
+
+  // Whether something is already written or printed inside a box of the sheet drawn in look (r in the page's units):
+  // dark marks in its middle, away from its edges, ruled lines not counted, and as tall as writing (3 points at
+  // least: a dotted line to write on isn't). A signature in the sign box; the client's company printed in its
+  // Company box (then it isn't written again). From QC Suite's inkIn.
+  function inkIn(look, r) {
+    if (!look || !r) return false;
+    var x0 = r.x0 + 4, x1 = r.x1 - 4, y0 = r.y0 + 2.5, y1 = r.y1 - 2.5;
+    var c0 = Math.max(0, Math.floor((x0 - look.x0) * look.scale)), c1 = Math.min(look.w, Math.ceil((x1 - look.x0) * look.scale));
+    var r0 = Math.max(0, Math.floor((look.y1 - y1) * look.scale)), r1 = Math.min(look.h, Math.ceil((look.y1 - y0) * look.scale));
+    var w = c1 - c0, h = r1 - r0;
+    if (w < 4 || h < 4) return false;
+    var data = new Uint8ClampedArray(w * h * 4);
+    for (var y = 0; y < h; y++) data.set(look.data.subarray(((r0 + y) * look.w + c0) * 4, ((r0 + y) * look.w + c1) * 4), y * w * 4);
+    if (!inkInBox(data, w, h).inked) return false;
+    var tall = 0;
+    for (var yy = 0; yy < h; yy++) {
+      var n = 0;
+      for (var xx = 0; xx < w && n < 2; xx++) if (lum(data, (yy * w + xx) * 4) < DARK) n++;
+      if (n >= 2) tall++;
+    }
+    return tall >= 3 * look.scale;
+  }
+
   // The lowest ruled line (a dark row running over half the area's width) in the bottom half of the area,
   // in pixels from the top, or null. For a boxed sign-off, the top of the Date row under the signature box.
   function bottomBorder(rgba, w, h) {
@@ -1091,6 +1390,7 @@ var SignCore = (function () {
            findCompanyBlock: findCompanyBlock, boxPlacement: boxPlacement, layoutPlacement: layoutPlacement,
            fracRect: fracRect, matchClientBlock: matchClientBlock,
            CHECK_HEADERS: CHECK_HEADERS, findChecklist: findChecklist, findContractorBlock: findContractorBlock, findTagsBox: findTagsBox,
+           pictureRows: pictureRows, cleanForOcr: cleanForOcr, pictureClientBlock: pictureClientBlock, inkIn: inkIn, headingBands: headingBands, ruledLines: ruledLines,
            STAMP: STAMP, stampPlacement: stampPlacement, emptySpot: emptySpot, inkInBox: inkInBox, rightBorder: rightBorder, bottomBorder: bottomBorder, blank: blank,
            fitImage: fitImage, stampPdf: stampPdf, isSigned: isSigned, plainText: plainText,
            leaveOutReason: leaveOutReason, parseQcms: parseQcms, hintPlacement: hintPlacement, ocrItems: ocrItems,

@@ -673,7 +673,11 @@ const groupTargets = (g) => g.pages.flatMap((p) => (targetsOf(p) || []).map((t) 
 function targetPlace(pg, t) {
   const name = nameText(), date = dateText();
   let p = t.block ? SignCore.placement({ box: pg.box, auto: t.block }, name, date) : SignCore.layoutPlacement(t.map, pg.box, name, date, '');
-  if (t.manual) p = { sig: { x: t.manual.x, y: t.manual.y - p.sig.h / 2, h: p.sig.h, maxW: Math.max(40, pg.box.x1 - t.manual.x - 10) }, texts: p.texts };
+  if (t.manual) {
+    // centred on the click, as wide as it was (kept on the page)
+    const w = Math.min(p.sig.maxW, p.sig.h * 3.5), x = Math.max(pg.box.x0 + 4, Math.min(t.manual.x - w / 2, pg.box.x1 - w - 4));
+    p = { sig: { x, y: t.manual.y - p.sig.h / 2, h: p.sig.h, maxW: w }, texts: p.texts };
+  }
   return t.map.company ? SignCore.withCompanyBox(p, t.map.company, pg.box, S.company) : p;
 }
 
@@ -708,7 +712,11 @@ const titled = (s) => String(s).replace(/[\s:]+$/, '').toLowerCase().replace(/(^
 
 function method(pg) {
   if (pg.stamp) return pg.stamp.clicked ? 'stampClick' : 'stamp';
-  if (targetsOf(pg)) return pg.targets.some((t) => t.manual) ? 'click' : pg.targets.some((t) => t.block) ? 'text' : 'hint';
+  if (targetsOf(pg)) {
+    if (pg.targets.some((t) => t.manual)) return 'click';
+    if (pg.targets.some((t) => t.rows)) return pg.targets.some((t) => t.guess) ? 'rowsGuess' : 'rows';
+    return pg.targets.some((t) => t.block) ? 'text' : 'hint';
+  }
   if (pg.manual) return pg.copied ? 'copied' : 'click';
   if (pg.block) return 'text';
   if (pg.hint) return 'hint';
@@ -719,6 +727,8 @@ const METHOD = {
   text: ['Found on sheet', 'ok', 'Found from the words on the sheet.'],
   hint: ['From the sender', 'ok', 'Position supplied with the pack.'],
   ocr: ['Read from scan', 'ok', 'Found by reading the scanned sheet.'],
+  rows: ['Read from scan', 'ok', 'Found from the rows under the client heading on the scanned sheet.'],
+  rowsGuess: ['Check position', 'warn', 'Placed in the {side}-hand sign-off block (its heading could not be read). Check it is the client’s.'],
   click: ['Placed by you', 'info', 'Placed where you clicked.'],
   copied: ['Placed by you', 'info', 'Copied from where you clicked on another sheet.'],
   stamp: ['Sign-off added', 'info', 'Client sign-off added in empty space near the bottom.'],
@@ -845,7 +855,8 @@ function updateCard(g) {
     how.textContent = 'Optional client position ("' + titled(head) + '"). ' +
       (g.ticked ? 'Ticked, so it will be signed. ' : 'Tick it if you need to sign here. ');
   } else if (ts) {
-    how.textContent = METHOD[m][2] + (ts.length > 1 ? ' ' + ts.length + ' client sign-offs on this sheet: each one ticked below is signed.' : '') +
+    how.textContent = METHOD[m][2].replace('{side}', (ts.find((t) => t.guess) || {}).guess) + (ts.length > 1 ? ' ' + ts.length + ' client sign-offs on this sheet: each one ticked below is signed.' : '') +
+      (ts.some((t) => t.printed) ? ' Your company is already printed on the sheet, so it is not written again.' : '') +
       ' Click on the sheet to move the nearest one. ';
     if (ts.some((t) => t.manual)) button('Put it back', () => { ts.forEach((t) => { t.manual = null; }); afterPlace(g); renderSheet(g); });
   } else if (m) {
@@ -1211,9 +1222,12 @@ async function ocrWorker() {
   return tesseract;
 }
 let ocrRunning = false;
+// A page that is a picture (no words) with nowhere to sign yet: read it. Every such page of a sheet is read, even when
+// another page has words (a scanned sheet with a photo page QCMS added after it).
+const toRead = (p) => !p.hasText && !place(p) && !p.ocrTried && !p.rotate && p.signoff !== 'none';
 async function runOcr() {
   if (ocrRunning) return;
-  const todo = S.groups.filter((g) => !g.cover && !g.hasText && !candidates(g).length && !g.ocrDone);
+  const todo = S.groups.filter((g) => !g.cover && !g.ocrDone && g.pages.some(toRead));
   if (!todo.length) return;
   ocrRunning = true;
   todo.forEach((g) => { g.ocrPending = true; updateCard(g); });
@@ -1221,18 +1235,25 @@ async function runOcr() {
   let done = 0;
   try {
     progress('Reading scanned sheets: 0 of ' + todo.length, 0, todo.length);
-    const worker = await ocrWorker();
+    // without OCR (Tesseract couldn't be loaded) the sign-off rows are still found, the client's column by its place
+    const worker = await ocrWorker().catch((e) => { console.error(e); return null; });
+    if (!worker) say('Scanned sheets could not be read automatically. Check where each signature goes, or click where it should go.', 'warn');
     for (const g of todo) {
       if (!S.groups.includes(g)) continue;
-      for (let i = g.pages.length - 1; i >= 0 && !candidates(g).length; i--) {
+      for (let i = g.pages.length - 1; i >= 0; i--) {
         const pg = g.pages[i];
-        if (pg.rotate || pg.ocrTried) continue;
+        if (!toRead(pg)) continue;
         pg.ocrTried = true;
+        if (await rowsPage(pg, worker)) { g.shown = i; continue; }
+        // the whole page read for a client block's words, as before: only while the sheet has nowhere to sign
+        if (!worker || candidates(g).length) continue;
         pg.ocr = await ocrPage(worker, pg);
         if (pg.ocr && pg.ocr.already) pg.already = pg.ocr.already;
         if (pg.ocr && !pg.manual) { g.shown = i; }
       }
       g.ocrPending = false; g.ocrDone = true;
+      // a sheet with words elsewhere (a photo page) starts unticked, nothing found on them: ticked once ready
+      if (!g.touched && !g.ticked && state(g) === 'ready') { g.ticked = true; g.el.querySelector('.tick').checked = true; ensureOn(g); }
       // read as signed already, or only an optional position: unticked, unless the client ticked it
       if (!g.touched && !g.file.forced && (state(g) === 'already' || state(g) === 'optional')) { g.ticked = false; g.el.querySelector('.tick').checked = false; }
       progress('Reading scanned sheets: ' + (++done) + ' of ' + todo.length, done, todo.length);
@@ -1283,6 +1304,66 @@ async function ocrPage(worker, pg) {
     if (block) return block;
   }
   return null;
+}
+
+// A sheet that is a picture: its sign-off blocks found from what it looks like (a heading's tinted band over ruled
+// rows: SignCore.pictureRows, as QC Suite's signing page does), the headings and row labels read with OCR (worker;
+// null when Tesseract couldn't be loaded: the client's column then taken by its place), and each piece put in its
+// own row: signature, name, date and company. The company is left off where the sheet already prints something in
+// its row, and a sign row with something in it already counts as signed. True when the client's block was found.
+async function rowsPage(pg, worker) {
+  try {
+    const page = await pg.file.pdf.getPage(pg.index + 1);
+    const look = await lookPage(page, pg.box);
+    const found = SignCore.pictureRows(look);
+    if (!found.length) return false;
+    const words = worker ? await ocrRows(worker, page, pg.box, found) : [];
+    const m = SignCore.pictureClientBlock(found, words, pg.box, findOpts);
+    pg.rowsLog = { blocks: found.length, words: words.length, found: !!m }; // for checking what the scan gave
+    if (!m) return false;
+    const inked = (k) => !!m[k] && SignCore.inkIn(look, SignCore.fracRect(m[k], pg.box));
+    const printed = inked('company');
+    if (printed) delete m.company;
+    const already = inked('sign') ? 'There is already a signature in the client box' : null;
+    pg.targets = [{ map: m, heading: m.heading, optional: false, block: null, manual: null, already, on: !already, rows: true, guess: m.guess, printed }];
+    pg.already = already;
+    return true;
+  } catch (e) {
+    console.error(e);
+    return false;
+  }
+}
+// The whole page drawn for looking at (sign-core's look).
+async function lookPage(page, box) {
+  const vp = page.getViewport({ scale: INK_SCALE });
+  const c = document.createElement('canvas');
+  c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+  await page.render({ canvasContext: ctx, canvas: c, viewport: vp }).promise;
+  return { data: ctx.getImageData(0, 0, c.width, c.height).data, w: c.width, h: c.height, scale: INK_SCALE, x0: box.x0, y1: box.y1 };
+}
+// The words of the found blocks (their headings and row labels): one OCR of the strip of the page holding them.
+async function ocrRows(worker, page, box, found) {
+  const scale = 3;
+  const top = Math.max(...found.map((f) => f.band.top)) + 4;
+  const foot = Math.min(...found.flatMap((f) => f.cols.flatMap((c) => c.rows.map((r) => r.box.y0)))) - 4;
+  const vp = page.getViewport({ scale });
+  const y0 = Math.max(0, Math.floor((box.y1 - top) * scale)), y1 = Math.min(Math.ceil(vp.height), Math.ceil((box.y1 - foot) * scale));
+  const c = document.createElement('canvas');
+  c.width = Math.ceil(vp.width); c.height = Math.max(1, y1 - y0);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+  await page.render({ canvasContext: ctx, canvas: c, viewport: vp, transform: [1, 0, 0, 1, 0, -y0] }).promise;
+  // black and white with the ruled lines taken out: a heading in a bordered, tinted cell reads like plain words
+  const img = ctx.getImageData(0, 0, c.width, c.height);
+  SignCore.cleanForOcr(img.data, c.width, c.height, scale);
+  ctx.putImageData(img, 0, 0);
+  await worker.setParameters({ tessedit_pageseg_mode: '11' });
+  const { data } = await worker.recognize(c, {}, { blocks: true });
+  const words = [];
+  for (const b of data.blocks || []) for (const p of b.paragraphs) for (const l of p.lines) for (const w of l.words) words.push(w);
+  return SignCore.ocrItems(words, box, scale, y0);
 }
 
 refresh();
