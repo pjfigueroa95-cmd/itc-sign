@@ -101,6 +101,46 @@
   .card textarea { width: 100%; min-height: 54px; resize: vertical; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
   .card.cover { opacity: .8; }
   .privacy { font-size: .85rem; color: var(--muted); }
+  /* over each piece, a finger's width around it: a finger there drags the piece, never pans the page (placeHolds) */
+  .sheet .hold, .vbox .hold { position: absolute; touch-action: none; cursor: move; }
+  .sheet .hold[hidden], .vbox .hold[hidden] { display: none; }
+  .sheet { overflow: hidden; }
+  /* the views (from QC Suite's signing page): List, By folder, Side by side, All sheets */
+  .views { margin-top: 16px; display: grid; gap: 12px; }
+  .viewbar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 10px 12px; position: sticky; top: 0; z-index: 3; }
+  .viewpick { display: flex; gap: 6px; align-items: center; font-weight: 600; }
+  .viewpick select, #search { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: #fff; font: inherit; }
+  #search { flex: 1 1 180px; min-width: 0; }
+  .picks { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .split { display: grid; gap: 12px; }
+  .split.side { grid-template-columns: minmax(280px, 380px) minmax(0, 1fr); align-items: start; }
+  .rows { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .split.side .rows { max-height: calc(100vh - 120px); overflow: auto; position: sticky; top: 64px; }
+  .rows .area { border-top: 1px solid var(--line); }
+  .rows .area:first-child { border-top: 0; }
+  .rows .area summary { display: flex; gap: 10px; align-items: center; padding: 8px 12px; background: var(--bg); cursor: pointer; font-weight: 600; }
+  .rows .area summary .n { color: var(--muted); font-weight: 400; font-size: .85rem; }
+  .rows .area summary button { margin-left: auto; padding: 2px 10px; font-size: .82rem; }
+  .itc { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; padding: 8px 12px; border-top: 1px solid var(--line); cursor: pointer; }
+  .itc:hover { background: var(--accent-soft); }
+  .itc.current { background: var(--accent-soft); box-shadow: 3px 0 0 var(--accent) inset; }
+  .itc input { width: 18px; height: 18px; }
+  .itc .no { font-weight: 600; overflow-wrap: anywhere; }
+  .itc .what { grid-column: 2 / 4; color: var(--muted); font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .itc .state { justify-self: end; }
+  .viewer { scroll-margin-top: 90px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
+  .vbar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .vbar .vtitle { flex: 1 1 160px; min-width: 0; display: flex; gap: 8px; align-items: center; overflow-wrap: anywhere; }
+  .vbar .vtitle input { width: 18px; height: 18px; flex: none; }
+  .vfoot { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  .vfoot .muted { font-size: .82rem; }
+  .vfoot button.link { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; text-decoration: underline; font-size: inherit; }
+  .vnav, .vzoom { display: flex; gap: 6px; align-items: center; font-size: .85rem; color: var(--muted); }
+  .vscroll { overflow: auto; height: calc(100vh - 230px); min-height: 320px; background: var(--off-soft); touch-action: pan-x pan-y; }
+  .vbox { position: relative; margin: 0 auto; background: #fff; transform-origin: 0 0; }
+  .vbox canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .vbox #v-ov { cursor: crosshair; }
+  @media (max-width: 760px) { .vzoom #v-fit { display: none; } .viewer { scroll-margin-top: 190px; } }
   .hidden { display: none !important; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>
@@ -121,6 +161,7 @@
     <section class="panel">
       <h2><span class="step">1</span> Your details</h2>
       <label class="field">Name <input id="name" autocomplete="name"></label>
+      <label class="field">Company <input id="company" autocomplete="organization"></label>
       <label class="field">Date (dd/mm/yyyy) <input id="date" inputmode="numeric"></label>
       <div class="err" id="date-err"></div>
     </section>
@@ -182,6 +223,41 @@
       <ul id="leftout-list"></ul>
     </details>
 
+    <div class="views hidden" id="views">
+      <div class="viewbar panel">
+        <label class="viewpick">View:
+          <select id="view" aria-label="View">
+            <option value="list">List</option>
+            <option value="area">By folder</option>
+            <option value="side">Side by side</option>
+            <option value="all">All sheets</option>
+          </select>
+        </label>
+        <input id="search" type="search" placeholder="Search number or folder" aria-label="Search number or folder">
+        <div class="picks">
+          <button class="btn" id="sel-all" type="button">Select all</button>
+          <button class="btn" id="sel-none" type="button">Select none</button>
+          <button class="btn" id="sel-waiting" type="button">Select waiting</button>
+          <label class="check hidden" id="only-ticked-wrap"><input type="checkbox" id="only-ticked"> Only ticked</label>
+        </div>
+        <button class="btn primary" id="sign-ticked" type="button" disabled>Sign the 0 ticked</button>
+      </div>
+      <div class="split" id="split">
+        <div class="rows" id="rows"></div>
+        <div class="viewer hidden" id="viewer">
+          <div class="vbar">
+            <button class="btn" id="v-back" type="button">‹ Back to the list</button>
+            <label class="vtitle"><input type="checkbox" id="v-tick" aria-label="Tick to sign this sheet"><b id="v-title"></b></label>
+            <span class="badge" id="v-state"></span>
+            <span class="vnav"><button class="btn" id="v-prev" type="button" aria-label="Previous page">‹</button><span id="v-page"></span><button class="btn" id="v-next" type="button" aria-label="Next page">›</button></span>
+            <span class="vzoom"><button class="btn" id="v-out" type="button" aria-label="Zoom out">−</button><button class="btn" id="v-fit" type="button">Fit to width</button><button class="btn" id="v-in" type="button" aria-label="Zoom in">+</button></span>
+          </div>
+          <div class="vfoot"><span class="muted" id="v-how"></span><button class="btn primary" id="v-sign" type="button">Sign</button></div>
+          <div class="vscroll" id="v-scroll"><div class="vbox" id="v-box"><canvas id="v-pdf"></canvas><canvas id="v-ov"></canvas></div></div>
+        </div>
+      </div>
+    </div>
+
     <div id="cards"></div>
   </section>
 </main>
@@ -217,6 +293,7 @@ function today() {
   return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
 }
 $('name').value = (params.get('name') || '').trim();
+$('company').value = S.company;
 $('date').value = today();
 {
   const bits = [];
@@ -232,7 +309,7 @@ function dateOk() {
   return d.getDate() === +m[1] && d.getMonth() === +m[2] - 1;
 }
 const dateText = () => $('date').value.trim();
-for (const id of ['name', 'date']) $(id).addEventListener('input', () => {
+for (const id of ['name', 'company', 'date']) $(id).addEventListener('input', () => {
   const ok = dateOk();
   $('date').setAttribute('aria-invalid', ok ? 'false' : 'true');
   $('date-err').textContent = ok ? '' : 'Use dd/mm/yyyy, e.g. ' + today();
@@ -474,7 +551,9 @@ async function analyse(file) {
       const v = page.view;
       const box = { x0: v[0], y0: v[1], x1: v[2], y1: v[3] };
       const items = SignCore.textItems(await page.getTextContent());
-      const pg = { file, index: i, box, rotate: page.rotate, hasText: items.some((t) => t.str.trim()), items };
+      // a page with words: more than a label's few (a scanned sheet carries its ITC number label as words, e.g.
+      // "<ITC no.> Rev 0" beside its QR: still a picture to read)
+      const pg = { file, index: i, box, rotate: page.rotate, hasText: SignCore.hasWords(items), items };
       const hint = qcms && qcms.pages[i];
       // what the sender says about this form's client sign-off: block | optional_stamp | none
       pg.signoff = (hint && hint.client_signoff) || null;
@@ -613,6 +692,7 @@ function rebuild() {
   }
   renderLeftOut();
   renderCards();
+  buildViews();
   const loaded = S.files.length > 0;
   drop.classList.toggle('compact', loaded);
   $('drop-title').textContent = loaded ? 'Different files?' : 'Drop the PDF or zip here';
@@ -662,29 +742,41 @@ function renderLeftOut() {
 // Pages of a group that have somewhere to sign.
 function candidates(g) { return g.pages.filter((p) => place(p)); }
 
-/* ---------- several client blocks on a sheet (a pack's client_blocks hint) ---------- */
-// A page's client blocks from the pack (not replaced by an added sign-off).
+/* ---------- client blocks on a sheet (a pack's client_blocks hint, or found on a picture sheet's rows) ---------- */
+// A page's client blocks (not replaced by an added sign-off).
 const targetsOf = (pg) => (pg.targets && !pg.stamp ? pg.targets : null);
 // Every client block of a group's pages: [page, block].
 const groupTargets = (g) => g.pages.flatMap((p) => (targetsOf(p) || []).map((t) => [p, t]));
 
-// What to draw for one client block: found on the sheet under its heading, else in the sender's boxes; moved
-// where the client clicked; the client's company in its Company box.
+// The client's company: his own field (the link's company to start with), written in a client block's Company box
+// unless the sheet prints it there already; left empty, written nowhere.
+const companyText = () => SignCore.plainText($('company').value.trim());
+// A box whose words are his company as typed, or as the link gave it: the form prints it there.
+const companyPrinted = (pg, c) => SignCore.printedIn(pg.items, c, pg.box, companyText()) || SignCore.printedIn(pg.items, c, pg.box, S.company);
+
+// What to draw for one client block: each piece in its own box (found on the sheet, or the sender's map, or the rows
+// found on a picture), never moved as one group; the company in its Company box unless the sheet has it; then whatever
+// the client moved or took off himself, piece by piece (from QC Suite's signing page).
 function targetPlace(pg, t) {
-  const name = nameText(), date = dateText();
-  let p = t.block ? SignCore.placement({ box: pg.box, auto: t.block }, name, date) : SignCore.layoutPlacement(t.map, pg.box, name, date, '');
-  if (t.manual) {
-    // centred on the click, as wide as it was (kept on the page)
-    const w = Math.min(p.sig.maxW, p.sig.h * 3.5), x = Math.max(pg.box.x0 + 4, Math.min(t.manual.x - w / 2, pg.box.x1 - w - 4));
-    p = { sig: { x, y: t.manual.y - p.sig.h / 2, h: p.sig.h, maxW: w }, texts: p.texts };
-  }
-  return t.map.company ? SignCore.withCompanyBox(p, t.map.company, pg.box, S.company) : p;
+  const off = leftOff(pg, t);
+  const name = off.name ? '' : nameText(), date = dateText();
+  const p = t.block ? SignCore.placement({ box: pg.box, auto: t.block }, name, date) : SignCore.layoutPlacement(t.map, pg.box, name, date, '');
+  const co = t.map.company && !off.company ? SignCore.withCompanyBox(p, t.map.company, pg.box, companyText()) : p;
+  return SignCore.adjustPlace(co, t.adj);
+}
+// The pieces a client block leaves off by itself, as the sheet has them already: his name as words in its box; the
+// company printed in its box (as words, or seen on a picture sheet: t.printed).
+function leftOff(pg, t) {
+  return {
+    name: !!t.map.name && SignCore.printedIn(pg.items, t.map.name, pg.box, nameText()),
+    company: !!t.map.company && (!!t.printed || companyPrinted(pg, t.map.company)),
+  };
 }
 
 // Everything signed on a page: each ticked client block, else the page's one placement.
 function signPlaces(pg) {
   const ts = targetsOf(pg);
-  if (ts) return ts.filter((t) => t.on).map((t) => targetPlace(pg, t));
+  if (ts) return ts.filter((t) => t.on).map((t) => targetPlace(pg, t)).filter(Boolean);
   const p = place(pg);
   return p ? [p] : [];
 }
@@ -698,7 +790,7 @@ function ensureOn(g) {
   let pick = ts.filter((t) => !t.already && !t.optional);
   if (!pick.length) pick = ts.filter((t) => !t.already);
   if (!pick.length) pick = ts;
-  pick.forEach((t) => { t.on = true; });
+  pick.forEach((t) => { t.on = true; t.adj = null; });
 }
 
 // Only optional client positions on the page (a block signed already doesn't count).
@@ -713,7 +805,6 @@ const titled = (s) => String(s).replace(/[\s:]+$/, '').toLowerCase().replace(/(^
 function method(pg) {
   if (pg.stamp) return pg.stamp.clicked ? 'stampClick' : 'stamp';
   if (targetsOf(pg)) {
-    if (pg.targets.some((t) => t.manual)) return 'click';
     if (pg.targets.some((t) => t.rows)) return pg.targets.some((t) => t.guess) ? 'rowsGuess' : 'rows';
     return pg.targets.some((t) => t.block) ? 'text' : 'hint';
   }
@@ -735,21 +826,27 @@ const METHOD = {
   stampClick: ['Sign-off added', 'info', 'Client sign-off added where you clicked.'],
 };
 
-// What to draw on a page, or null: with the client's company in the block's Company box when the pack says where it is.
-// A page with several client blocks: the first ticked one (signPlaces gives them all).
+// What to draw on a page, or null: with the client's company in the block's Company box when the pack says where it is
+// (unless the sheet prints it there), then what the client moved or took off. A page with several client blocks: the
+// first ticked one (signPlaces gives them all).
 function place(pg) {
   const p = placeOnly(pg);
-  return pg.stamp || pg.targets || !pg.companyBox ? p : SignCore.withCompanyBox(p, pg.companyBox, pg.box, S.company);
+  if (pg.targets && !pg.stamp) return p; // (targetPlace: the company and his own changes already)
+  const own = p && p.texts.some((t) => t.role === 'company'); // the block's own Company line has it already
+  const co = pg.stamp || own || !pg.companyBox || companyPrinted(pg, pg.companyBox) ? p : SignCore.withCompanyBox(p, pg.companyBox, pg.box, companyText());
+  // an added sign-off (a frame) moves whole
+  return pg.stamp ? co : SignCore.adjustPlace(co, pg.adj);
 }
 
 function placeOnly(pg) {
   const name = nameText(), date = dateText();
   if (pg.stamp) return SignCore.stampPlacement(pg.stamp, pg.box, name, date);
   if (pg.targets) return targetPlace(pg, pg.targets.find((t) => t.on) || pg.targets[0]);
-  if (pg.manual) return SignCore.placement({ box: pg.box, auto: pg.block || pg.ocr, manual: pg.manual }, name, date);
-  if (pg.block) return SignCore.placement({ box: pg.box, auto: pg.block }, name, date);
+  // (a block found on the words with a Company line of its own: the company there, unless printed: placement)
+  if (pg.manual) return SignCore.placement({ box: pg.box, auto: pg.block || pg.ocr, manual: pg.manual }, name, date, companyText());
+  if (pg.block) return SignCore.placement({ box: pg.box, auto: pg.block }, name, date, companyText());
   if (pg.hint) return SignCore.hintPlacement(pg.hint, pg.box, name, date);
-  if (pg.ocr) return SignCore.placement({ box: pg.box, auto: pg.ocr }, name, date);
+  if (pg.ocr) return SignCore.placement({ box: pg.box, auto: pg.ocr }, name, date, companyText());
   return null;
 }
 
@@ -796,20 +893,13 @@ function renderCards() {
     q('.title').title = g.title;
     q('.tick').checked = g.ticked;
     q('.tick').setAttribute('aria-label', 'Tick to sign ' + g.title);
-    q('.tick').addEventListener('change', () => {
-      g.ticked = q('.tick').checked;
-      g.touched = true;
-      if (!g.ticked) g.signed = false;
-      else ensureOn(g);
-      drawOverlay(g);
-      updateCard(g); refresh();
-      if (!g.ticked) q('.note').focus();
-    });
+    q('.tick').addEventListener('change', () => setTick(g, q('.tick').checked, true, false, true));
     q('.sign').addEventListener('click', () => signOne(g));
     q('.note').addEventListener('input', () => { g.note = q('.note').value; S.downloaded = false; refresh(); });
     q('.prev').addEventListener('click', () => { g.shown = Math.max(0, g.shown - 1); renderSheet(g); });
     q('.next').addEventListener('click', () => { g.shown = Math.min(g.pages.length - 1, g.shown + 1); renderSheet(g); });
-    q('.ov').addEventListener('click', (e) => clickPlace(g, e));
+    // a piece dragged on its own, or taken off with its ×; a tap where nothing is: the place where the signature goes
+    listenOn(cardSurf(g), q('.sheet'));
     q('.zoom').addEventListener('click', () => {
       if (g.collapsed) g.collapsed = false; else g.zoom = !g.zoom;
       renderSheet(g);
@@ -854,17 +944,26 @@ function updateCard(g) {
     const head = ts ? (ts.find((t) => t.optional && !t.already) || ts[0]).heading : (pg.block || pg.ocr).heading;
     how.textContent = 'Optional client position ("' + titled(head) + '"). ' +
       (g.ticked ? 'Ticked, so it will be signed. ' : 'Tick it if you need to sign here. ');
+  } else if (pg.adj && pg.adj.off.includes('sig') && !ts) {
+    how.textContent = 'Signature taken off this page. ';
+    button('Put it back', () => { pg.adj = null; setTick(g, true, true, true); afterPlace(g); renderSheet(g); });
   } else if (ts) {
-    how.textContent = METHOD[m][2].replace('{side}', (ts.find((t) => t.guess) || {}).guess) + (ts.length > 1 ? ' ' + ts.length + ' client sign-offs on this sheet: each one ticked below is signed.' : '') +
-      (ts.some((t) => t.printed) ? ' Your company is already printed on the sheet, so it is not written again.' : '') +
-      ' Click on the sheet to move the nearest one. ';
-    if (ts.some((t) => t.manual)) button('Put it back', () => { ts.forEach((t) => { t.manual = null; }); afterPlace(g); renderSheet(g); });
+    // what the sheet has already, left off by itself
+    const off = [...new Set(ts.filter((t) => t.on).flatMap((t) => Object.entries(leftOff(pg, t)).filter(([, v]) => v).map(([k]) => k)))];
+    const side = (ts.find((t) => t.guess) || {}).guess;
+    how.textContent = METHOD[m][2].replace('{side}', side) + (ts.length > 1 ? ' ' + ts.length + ' client sign-offs on this sheet: each one ticked below is signed.' : '') +
+      (off.includes('company') ? ' Your company is already printed on the sheet, so it is not written again.' : '') +
+      (off.includes('name') ? ' Your name is already printed on the sheet, so it is not written again.' : '') +
+      ' Drag a piece to move it, or tap its × to take it off. ';
+    if (ts.some((t) => t.adj || (!t.on && !t.optional && !t.already))) button('Put it back', () => { ts.forEach((t) => { t.adj = null; if (!t.optional && !t.already) t.on = true; }); setTick(g, true, true, true); afterPlace(g); renderSheet(g); });
   } else if (m) {
-    how.textContent = METHOD[m][2] + ' Click on the sheet to move it. ';
+    // a block found on the sheet or from the sender: its pieces dragged; a spot the client placed: moved by a click too
+    const found = !pg.manual && (pg.block || pg.hint || pg.ocr);
+    how.textContent = METHOD[m][2] + (pg.stamp ? ' Click on the sheet to move it. ' : found ? ' Drag a piece to move it, or tap its × to take it off. ' : ' Click on the sheet to move it, drag a piece, or tap its × to take it off. ');
     if (pg.stamp) button('Remove', () => { pg.stamp = null; afterPlace(g); renderSheet(g); });
     else if (pg.manual) {
-      button(pg.block || pg.hint || pg.ocr ? 'Put it back' : 'Remove', () => { pg.manual = null; pg.copied = false; afterPlace(g); renderSheet(g); });
-    }
+      button(pg.block || pg.hint || pg.ocr ? 'Put it back' : 'Remove', () => { pg.manual = null; pg.copied = false; pg.adj = null; afterPlace(g); renderSheet(g); });
+    } else if (pg.adj) button('Put it back', () => { pg.adj = null; afterPlace(g); renderSheet(g); });
   } else if (pg.stampWait) how.textContent = 'No empty space found. Click on the sheet where the client sign-off should go.';
   else if (st === 'click' || st === 'reading') how.textContent = 'Click on the sheet where your signature goes.';
   else if (candidates(g).length) how.textContent = 'Nothing to sign on this page. Signature is on page ' + (g.pages.indexOf(candidates(g)[0]) + 1) + '.';
@@ -911,6 +1010,7 @@ function renderBlocks(g) {
     cb.setAttribute('aria-label', 'Sign ' + bits[0]);
     cb.addEventListener('change', () => {
       t.on = cb.checked;
+      if (t.on) t.adj = null;
       if (t.on && !g.ticked) { g.ticked = true; g.touched = true; g.el.querySelector('.tick').checked = true; }
       if (g.signed) S.downloaded = false;
       if (t.on && p !== g.pages[g.shown]) { g.shown = g.pages.indexOf(p); renderSheet(g); }
@@ -933,6 +1033,8 @@ function renderBlocks(g) {
 /* ---------- drawing a sheet ---------- */
 let renderChain = Promise.resolve();
 function renderSheet(g) {
+  // the page drawn again (another page, or zoomed): its pieces' holds gone at once, placed again once drawn
+  for (const d of cardSurf(g).holds) d.hidden = true;
   if (g.collapsed) { updateCard(g); return renderChain; }
   renderChain = renderChain.then(() => doRender(g)).catch(() => {});
   updateCard(g);
@@ -947,7 +1049,7 @@ async function doRender(g) {
   // Zoomed: a window around the signature (ZOOM_W x ZOOM_H of the page, or around every client block of the
   // page when it has several), else the whole sheet.
   const ts = targetsOf(pg);
-  const pls = !g.zoom ? [] : ts ? ts.map((t) => targetPlace(pg, t)) : [place(pg)].filter(Boolean);
+  const pls = (!g.zoom ? [] : ts ? ts.map((t) => targetPlace(pg, t) || SignCore.layoutPlacement(t.map, pg.box, '', '', '')) : [place(pg)]).filter(Boolean);
   const sx0 = Math.min(...pls.map((p) => p.sig.x)), sx1 = Math.max(...pls.map((p) => p.sig.x + Math.min(p.sig.maxW, p.sig.h * 3.5)));
   const sy0 = Math.min(...pls.map((p) => p.sig.y)), sy1 = Math.max(...pls.map((p) => p.sig.y + p.sig.h));
   const many = pls.length > 1;
@@ -973,17 +1075,227 @@ async function doRender(g) {
   drawOverlay(g);
 }
 
+/* ---------- the two places a sheet is shown: its card, and the viewer (Side by side, List and By folder) ---------- */
+// The same pieces, holds, clicks and drags on both: a surface knows its overlay, the element holding its holds, the
+// page it shows and how that page is drawn there (its viewport: null until drawn).
+function cardSurf(g) {
+  if (!g.surf) {
+    g.surf = {
+      g, viewer: false, holds: [], holdOf: new Map(), drag: null,
+      get ov() { return g.el ? g.el.querySelector('.ov') : null; },
+      get sheet() { return g.el ? g.el.querySelector('.sheet') : null; },
+      get page() { return g.shown; },
+      get vp() { return g.vp && g.vpPage === g.shown ? g.vp : null; },
+    };
+  }
+  return g.surf;
+}
+const viewSurf = {
+  viewer: true, holds: [], holdOf: new Map(), drag: null,
+  get g() { return V.current; },
+  get ov() { return $('v-ov'); },
+  get sheet() { return $('v-box'); },
+  get page() { return V.page; },
+  get vp() { return V.current && V.vp && V.vpOf === V.current && V.vpPage === V.page ? V.vp : null; },
+};
+
+// A sheet's pieces drawn again wherever it is shown.
 function drawOverlay(g) {
-  const ov = g.el && g.el.querySelector('.ov');
-  if (!ov || !g.vp || g.vpPage !== g.shown) return;
-  const ctx = ov.getContext('2d'), vp = g.vp;
+  if (g.el) drawOn(cardSurf(g));
+  if (V.current === g) drawOn(viewSurf);
+}
+function drawOn(s) {
+  const g = s.g, ov = s.ov;
+  if (!g || !ov) return;
+  placeHolds(s);
+  const vp = s.vp;
+  if (!vp) return;
+  const ctx = ov.getContext('2d');
   ctx.clearRect(0, 0, ov.width, ov.height);
-  const pg = g.pages[g.shown], ts = targetsOf(pg);
+  const pg = g.pages[s.page], ts = targetsOf(pg);
   // several client blocks: the ticked ones as they will be signed, the others as an outline
-  const on = ts ? signPlaces(pg) : [place(pg)].filter(Boolean);
-  for (const t of ts ? ts.filter((x) => !x.on) : []) drawPlace(ctx, vp, targetPlace(pg, t), 0.4, titled(t.heading) + ': not ticked');
+  const on = signPlaces(pg);
+  for (const t of ts ? ts.filter((x) => !x.on) : []) drawPlace(ctx, vp, SignCore.layoutPlacement(t.map, pg.box, nameText(), dateText(), ''), 0.4, titled(t.heading) + (t.optional ? ' (optional): tick to sign here' : t.already ? ': signed already' : ': not ticked'));
   for (const pl of on) drawPlace(ctx, vp, pl, g.signed ? 1 : g.ticked ? 0.55 : 0.25);
+  // each piece's ×
+  for (const o of owners(pg)) for (const r of pieceRectsOn(s, o.p)) drawClose(ctx, r.close);
   ctx.globalAlpha = 1;
+}
+
+/* ---------- moving or taking off one piece (from QC Suite's signing page) ---------- */
+// A finger on a piece (within a finger's width of it, or on its ×) is the page's, anywhere else on the sheet the
+// browser's (scrolling, zooming): a see-through hold over each piece that the browser never pans (touch-action none),
+// placed as the pieces are drawn, in fractions of the sheet so a turned phone keeps them in place.
+function placeHolds(s) {
+  const sheet = s.sheet, ov = s.ov, holds = s.holds;
+  const rects = [], pieces = [];
+  if (s.g && s.vp && ov.width && ov.height) {
+    for (const o of owners(s.g.pages[s.page])) for (const r of pieceRectsOn(s, o.p)) {
+      pieces.push({ o, role: r.role });
+      const x0 = Math.min(r.x0, r.close.x - r.close.r), x1 = Math.max(r.x1, r.close.x + r.close.r);
+      const y0 = Math.min(r.y0, r.close.y - r.close.r), y1 = Math.max(r.y1, r.close.y + r.close.r);
+      rects.push({ l: (100 * x0) / ov.width, t: (100 * y0) / ov.height, w: (100 * (x1 - x0)) / ov.width, h: (100 * (y1 - y0)) / ov.height });
+    }
+  }
+  while (holds.length < rects.length) {
+    const d = document.createElement('div');
+    d.className = 'hold';
+    sheet.append(d);
+    holds.push(d);
+  }
+  holds.forEach((d, i) => {
+    const r = rects[i];
+    d.hidden = !r;
+    if (r) s.holdOf.set(d, pieces[i]); else s.holdOf.delete(d);
+    if (!r) return;
+    d.style.left = 'calc(' + r.l + '% - ' + FINGER + 'px)';
+    d.style.top = 'calc(' + r.t + '% - ' + FINGER + 'px)';
+    d.style.width = 'calc(' + r.w + '% + ' + 2 * FINGER + 'px)';
+    d.style.height = 'calc(' + r.h + '% + ' + 2 * FINGER + 'px)';
+  });
+}
+// The pieces on a page, each with what holds it: a client block, or the page's one placement (a block found on the
+// sheet, the sender's box, a click). An added sign-off (a frame) moves whole, by a click.
+function owners(pg) {
+  const out = [];
+  const ts = targetsOf(pg);
+  if (ts) for (const t of ts.filter((x) => x.on)) { const p = targetPlace(pg, t); if (p) out.push({ kind: 'block', t, p }); }
+  else if (!pg.stamp) { const p = place(pg); if (p) out.push({ kind: 'page', p }); }
+  return out;
+}
+const holderOf = (pg, o) => (o.kind === 'block' ? o.t : pg);
+// (made only when something moves or comes off: a tap alone changes nothing)
+const adjOf = (pg, o) => {
+  const holder = holderOf(pg, o);
+  if (!holder.adj) holder.adj = { moves: {}, off: [] };
+  return holder.adj;
+};
+const CLOSE = 9; // the ×'s radius, in canvas pixels before the screen's scale
+// A text's width at a size, in the page's units, measured in the font it is drawn in.
+function measureOn(s) {
+  const ctx = s.ov.getContext('2d');
+  return (str, z) => { ctx.font = z + 'px Helvetica, Arial, sans-serif'; return ctx.measureText(str).width; };
+}
+// A placement's pieces in the canvas's pixels, each with where its × goes (its top right corner).
+function pieceRectsOn(s, p) {
+  const k = Math.min(2, window.devicePixelRatio || 1);
+  return SignCore.pieceRects(p, S.sig ? S.sig.aspect : 0, measureOn(s)).map((r) => {
+    const a = s.vp.convertToViewportPoint(r.x0, r.y0), b = s.vp.convertToViewportPoint(r.x1, r.y1);
+    const x0 = Math.min(a[0], b[0]), x1 = Math.max(a[0], b[0]), y0 = Math.min(a[1], b[1]), y1 = Math.max(a[1], b[1]);
+    // its × at its top right corner, just clear of its words (never over them), kept on the sheet
+    const cr = CLOSE * k, cx = Math.min(x1 + cr + k, s.ov.width - cr - 1);
+    return { role: r.role, x0, y0, x1, y1, close: { x: cx, y: y0 - cr * 0.5, r: cr } };
+  });
+}
+function drawClose(ctx, c) {
+  ctx.globalAlpha = 1;
+  ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff'; ctx.fill();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = '#a3231a'; ctx.stroke();
+  const d = c.r * 0.45;
+  ctx.beginPath(); ctx.moveTo(c.x - d, c.y - d); ctx.lineTo(c.x + d, c.y + d); ctx.moveTo(c.x + d, c.y - d); ctx.lineTo(c.x - d, c.y + d); ctx.stroke();
+}
+// Where a pointer is on the sheet of a surface, in the canvas's pixels and in the page's units.
+function sheetPoint(s, clientX, clientY) {
+  const ov = s.ov, r = ov.getBoundingClientRect();
+  const cx = (clientX - r.left) * ov.width / r.width, cy = (clientY - r.top) * ov.height / r.height;
+  const [x, y] = s.vp.convertToPdfPoint(cx, cy);
+  return { cx, cy, x, y };
+}
+// The piece (or its ×) under a pointer on the page shown, or null: the × within its circle, else the piece nearest within
+// a few pixels. A finger's width around each piece is its hold (placeHolds): a pointer landing on a hold takes that
+// hold's piece (pieceDown).
+const FINGER = 16;
+function hitAt(s, clientX, clientY) {
+  if (!s.g || !s.vp) return null;
+  const pg = s.g.pages[s.page], at = sheetPoint(s, clientX, clientY);
+  const pad = 6;
+  const all = owners(pg).map((o) => ({ o, rects: pieceRectsOn(s, o.p) }));
+  for (const { o, rects } of all) for (const r of rects) if (Math.hypot(at.cx - r.close.x, at.cy - r.close.y) <= r.close.r + 4) return { o, role: r.role, close: true };
+  let best = null;
+  for (const { o, rects } of all) for (const r of rects) {
+    const d = Math.hypot(Math.max(r.x0 - at.cx, 0, at.cx - r.x1), Math.max(r.y0 - at.cy, 0, at.cy - r.y1));
+    if (d <= pad && (!best || d < best.d)) best = { o, role: r.role, close: false, d };
+  }
+  return best;
+}
+function pieceDown(s, e) {
+  const g = s.g;
+  // the main button or one finger only, as the click it replaces
+  if (!g || !s.vp || e.button !== 0 || e.isPrimary === false) { s.drag = null; return; }
+  const held = s.holdOf.get(e.target);
+  const h = hitAt(s, e.clientX, e.clientY) || (held ? { o: held.o, role: held.role, close: false } : null);
+  const at = sheetPoint(s, e.clientX, e.clientY);
+  if (h && h.close) { s.drag = { close: true }; takeOff(s, h); return; }
+  if (h) {
+    const pg = g.pages[s.page], m = holderOf(pg, h.o).adj?.moves?.[h.role] || { dx: 0, dy: 0 };
+    s.drag = { o: h.o, role: h.role, from: at, base: { dx: m.dx, dy: m.dy }, moved: false };
+    // held until he lets go, however far or fast he moves: the pointer kept by the sheet's own element (never by a
+    // hold, which moves and hides as the piece is drawn again), and nothing of the browser's own started by the press
+    s.sheet.setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+    return;
+  }
+  s.drag = { tap: true, from: at };
+}
+function pieceMove(s, e) {
+  const d = s.drag, g = s.g;
+  if (!d || !d.o || !g || !s.vp) return;
+  const at = sheetPoint(s, e.clientX, e.clientY);
+  if (!d.moved && Math.hypot(at.cx - d.from.cx, at.cy - d.from.cy) < 4) return;
+  d.moved = true;
+  const pg = g.pages[s.page];
+  const moves = adjOf(pg, d.o).moves;
+  moves[d.role] = { dx: d.base.dx + at.x - d.from.x, dy: d.base.dy + at.y - d.from.y };
+  // never dragged off the sheet: the piece kept inside the page
+  const now = d.o.kind === 'block' ? targetPlace(pg, d.o.t) : place(pg);
+  const r = now && SignCore.pieceRects(now, S.sig ? S.sig.aspect : 0, measureOn(s)).find((x) => x.role === d.role);
+  if (r) {
+    const m = moves[d.role], b = pg.box;
+    m.dx += Math.max(0, b.x0 - r.x0) - Math.max(0, r.x1 - b.x1);
+    m.dy += Math.max(0, b.y0 - r.y0) - Math.max(0, r.y1 - b.y1);
+  }
+  S.downloaded = false;
+  drawOverlay(g);
+}
+function pieceUp(s, e) {
+  const d = s.drag, g = s.g;
+  s.drag = null;
+  if (!d || d.close || !g) return;
+  const pg = g.pages[s.page];
+  if (d.o && d.moved) { afterPlace(g); return; }
+  // a client block's pieces move only by dragging (found on the words, the sender's box, a scan read, the rows)
+  if (targetsOf(pg) || (!pg.stamp && (pg.block || pg.hint || pg.ocr))) return;
+  // a tap on a page with no client block (or on its one piece without moving it): the signature goes there
+  if (!s.vp) return;
+  clickPlace(s, e);
+}
+// A drag the browser took over (a scroll, a zoom) or the pointer lost: what moved so far kept.
+function pieceGone(s) {
+  const d = s.drag;
+  s.drag = null;
+  if (s.g) { if (d && d.moved) afterPlace(s.g); else drawOverlay(s.g); }
+}
+// A surface's sheet taking a pointer: a piece pressed, moved and let go, a tap, or (the browser's) a drag cancelled.
+function listenOn(s, el) {
+  el.addEventListener('pointerdown', (e) => pieceDown(s, e));
+  el.addEventListener('pointermove', (e) => pieceMove(s, e));
+  el.addEventListener('pointerup', (e) => pieceUp(s, e));
+  el.addEventListener('pointercancel', () => pieceGone(s));
+}
+// The × on a piece: that piece left off. The signature's: nothing stamped there (a client block unticked, a clicked
+// spot gone, the page's own spot taken off until Put it back).
+function takeOff(s, h) {
+  const g = s.g, pg = g.pages[s.page];
+  if (h.role === 'sig') {
+    if (h.o.kind === 'block') { h.o.t.on = false; h.o.t.adj = null; }
+    else if (pg.manual && !(pg.block || pg.hint || pg.ocr)) { pg.manual = null; pg.copied = false; pg.adj = null; }
+    else adjOf(pg, h.o).off.push('sig');
+  } else adjOf(pg, h.o).off.push(h.role);
+  S.downloaded = false;
+  // nothing left to sign on the sheet: unticked, so its tick, badge and counts agree (Put it back ticks it again)
+  if (!hasPlaces(g)) setTick(g, false, true, true);
+  afterPlace(g);
 }
 
 // One placement on the overlay: the signature (or its box before there is one) and its texts; `outline`: only
@@ -1031,41 +1343,26 @@ function drawPlace(ctx, vp, pl, alpha, outline) {
 function redrawAll() { for (const g of S.groups) { drawOverlay(g); } }
 
 /* ---------- click to place ---------- */
-function clickPlace(g, e) {
-  if (!g.vp || g.vpPage !== g.shown) return;
-  const ov = e.currentTarget, r = ov.getBoundingClientRect();
-  const [x, y] = g.vp.convertToPdfPoint((e.clientX - r.left) * ov.width / r.width, (e.clientY - r.top) * ov.height / r.height);
-  const pg = g.pages[g.shown];
+function clickPlace(s, e) {
+  const g = s.g;
+  if (!g || !s.vp) return;
+  const { x, y } = sheetPoint(s, e.clientX, e.clientY);
+  const pg = g.pages[s.page];
+  // the page's signature taken off with its ×, then a tap: the signature again, where he tapped
+  if (pg.adj && pg.adj.off.includes('sig')) pg.adj = null;
   const needed = !candidates(g).length;
   // A sheet with text but no client block gets a labelled client sign-off where the client clicks.
   if (pg.stamp || pg.stampWait || (needed && pg.hasText)) {
     const S2 = SignCore.STAMP;
     pg.stamp = { x: x - S2.w / 2, y: y - S2.h / 2, clicked: true };
     pg.stampWait = false;
-    g.ticked = true;
-    g.el.querySelector('.tick').checked = true;
+    setTick(g, true, true, true);
     afterPlace(g);
     renderSheet(g);
     return;
   }
-  // several client blocks: the click moves the nearest one (and ticks it)
-  const ts = targetsOf(pg);
-  if (ts) {
-    let best = ts[0], dist = Infinity;
-    for (const t of ts) {
-      const s = targetPlace(pg, t).sig;
-      const d = Math.hypot(x - (s.x + Math.min(s.maxW, s.h * 3.5) / 2), y - (s.y + s.h / 2));
-      if (d < dist) { dist = d; best = t; }
-    }
-    best.manual = { x, y }; best.on = true;
-    g.ticked = true;
-    g.el.querySelector('.tick').checked = true;
-    afterPlace(g);
-    return;
-  }
-  pg.manual = { x, y }; pg.copied = false;
-  g.ticked = true;
-  g.el.querySelector('.tick').checked = true;
+  pg.manual = { x, y }; pg.copied = false; pg.adj = null;
+  setTick(g, true, true, true);
   // First placement on a sheet with nothing found: copy the spot to the other sheets that still need one.
   if (needed && !g.hasText) {
     const fx = (x - pg.box.x0) / (pg.box.x1 - pg.box.x0), fy = (y - pg.box.y0) / (pg.box.y1 - pg.box.y0);
@@ -1080,7 +1377,7 @@ function clickPlace(g, e) {
     }
   }
   afterPlace(g);
-  if (needed) renderSheet(g); // zoom in on the new spot
+  if (needed && !s.viewer) renderSheet(g); // zoom in on the new spot
 }
 // "Add client sign-off" on a sheet with no client block: a small "Reviewed by Client" block in the best
 // empty space near the bottom of the page on show, above the footer (or where the client then clicks).
@@ -1097,14 +1394,14 @@ async function addSignoff(g) {
     const spot = SignCore.emptySpot(ctx.getImageData(0, 0, c.width, c.height).data, c.width, c.height, 1, pg.box, pg.items);
     if (spot) { pg.stamp = spot; pg.stampWait = false; } else pg.stampWait = true;
   } catch (e) { pg.stampWait = true; }
-  g.ticked = true;
-  g.el.querySelector('.tick').checked = true;
+  setTick(g, true, true, true);
   g.zoom = !pg.stampWait;
   afterPlace(g);
   renderSheet(g);
 }
 function afterPlace(g) {
-  if (!candidates(g).length) g.signed = false;
+  // nothing left to stamp (every signature taken off): no longer signed
+  if (!candidates(g).length || !hasPlaces(g)) g.signed = false;
   S.downloaded = S.downloaded && !g.signed;
   drawOverlay(g); updateCard(g); refresh();
 }
@@ -1143,10 +1440,11 @@ $('sign-all').addEventListener('click', () => {
     const why = [waiting.length ? `${waiting.length} ticked ${waiting.length === 1 ? 'sheet needs' : 'sheets need'} a click to place the signature first` : '',
       noBlock.length ? `${noBlock.length} ticked ${noBlock.length === 1 ? 'sheet has' : 'sheets have'} none of their client sign-offs ticked` : ''].filter(Boolean).join('; ');
     say(`Signed ${n}. ${why}.`, 'warn');
-    (waiting[0] || noBlock[0]).el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    showCard(waiting[0] || noBlock[0]);
   } else say(n ? `Signed ${n}. Check them, then download.` : 'Everything ticked is already signed.', 'ok');
   refresh();
 });
+$('sign-ticked').addEventListener('click', () => $('sign-all').click());
 function unsignAll(msg) {
   let any = false;
   for (const g of S.groups) if (g.signed) { g.signed = false; any = true; updateCard(g); }
@@ -1206,7 +1504,309 @@ function refresh() {
   $('n-signed').textContent = gs.filter((g) => g.signed).length;
   $('sign-all').disabled = S.busy || !gs.some((g) => g.ticked && !g.signed);
   $('download').disabled = S.busy || !S.groups.some((g) => g.signed || g.note.trim());
+  // the sign button says how many
+  const toSign = gs.filter((g) => g.ticked && !g.signed && candidates(g).length && hasPlaces(g)).length;
+  $('sign-all').textContent = $('sign-ticked').textContent = 'Sign the ' + toSign + ' ticked';
+  $('sign-ticked').disabled = $('sign-all').disabled;
+  updateViews();
 }
+
+/* ---------- the views (from QC Suite's signing page) ---------- */
+// List, By folder, Side by side and All sheets (the cards), the choice remembered in this browser; one tick per ITC
+// whichever view ticks it (the card's own); a search, Select all / none / waiting; a viewer of one sheet large, a page at
+// a time. Signing itself is the cards' as before: the views only tick, show and open.
+const VIEW_KEY = 'signItcs.view';
+const V = { view: '', rows: new Map(), current: null, page: 0, zoom: 0, fit: true, drawing: null };
+const phone = () => window.matchMedia('(max-width: 760px)').matches;
+function savedView() {
+  try { return localStorage.getItem(VIEW_KEY) || ''; } catch (e) { return ''; }
+}
+// The view shown: the one chosen (Side by side shows List on a phone), else List on a phone, Side by side on a computer.
+function viewNow() {
+  const v = V.view || savedView() || (phone() ? 'list' : 'side');
+  return v === 'side' && phone() ? 'list' : v;
+}
+// The same tick as the card's: ticked to sign (its blocks to sign put on), unticked not signed. quiet: the page brought
+// up to date by the caller (a bulk tick, once); force: even a cover page (the card's own tick).
+function setTick(g, on, byHim = true, quiet = false, force = false) {
+  if ((g.cover && !force) || g.ticked === on) { if (!quiet) { drawOverlay(g); updateCard(g); refresh(); } return; }
+  g.ticked = on;
+  if (byHim) g.touched = true;
+  if (!g.ticked) g.signed = false;
+  else ensureOn(g);
+  g.el.querySelector('.tick').checked = on;
+  if (quiet) return;
+  drawOverlay(g);
+  updateCard(g); refresh();
+  if (!on && force) g.el.querySelector('.note').focus();
+}
+// What a bulk tick takes: an ITC still to sign here (one that looks signed, or has only an optional block, or none to
+// sign, is the client's to tick on its own), never one signed already.
+const waitingNow = (g) => !g.cover && !g.signed && ['ready', 'click', 'reading'].includes(state(g));
+function bulk(list, on) {
+  for (const g of list) if (!g.cover && !g.signed && matches(g) && (!on(g) || waitingNow(g))) setTick(g, on(g), true, true);
+  for (const g of list) if (g.el) { drawOverlay(g); updateCard(g); }
+  refresh();
+}
+// What a row says of its ITC.
+function rowState(g) {
+  if (g.signed) return ['Signed', 'ok'];
+  const st = state(g);
+  if (st === 'already') return ['Already signed', ''];
+  if (st === 'optional') return ['Optional', 'info'];
+  if (st === 'none') return ['No sign-off', ''];
+  if (st === 'click') return ['Click to place', 'warn'];
+  if (st === 'reading') return ['Reading scan…', 'info'];
+  if (!g.ticked) return [g.note.trim() ? 'Skipped, with a note' : 'Not ticked', ''];
+  return [METHOD[method(candidates(g)[0])][0], METHOD[method(candidates(g)[0])][1]];
+}
+// The folder a sheet came from (inside the zip, or the folder dropped): By folder groups by it.
+const folderOf = (g) => g.file.path.split('/').slice(0, -1).filter((x) => x && !/^ITC for Signature$/i.test(x)).join(' / ');
+// Whether an ITC matches the search: its number, its file or its folder hold the words (any case).
+function matches(g) {
+  const q = $('search').value.trim().toLowerCase();
+  if (!q) return true;
+  return [g.title, g.file.path].some((x) => String(x || '').toLowerCase().includes(q));
+}
+// The rows, made once for what was dropped (every ITC, cover pages left out): By folder groups them under folding headings.
+function buildViews() {
+  const wrap = $('rows');
+  wrap.textContent = '';
+  V.rows.clear();
+  const gs = S.groups.filter((g) => !g.cover);
+  $('views').classList.toggle('hidden', !gs.length);
+  const row = (g) => {
+    const el = document.createElement('div');
+    el.className = 'itc';
+    el.dataset.id = g.id;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.setAttribute('aria-label', 'Tick to sign ' + g.title);
+    cb.addEventListener('click', (e) => e.stopPropagation());
+    cb.addEventListener('change', () => setTick(g, cb.checked));
+    const no = document.createElement('span'); no.className = 'no'; no.textContent = g.title;
+    const st = document.createElement('span'); st.className = 'badge state';
+    const what = document.createElement('span'); what.className = 'what';
+    what.textContent = [folderOf(g), g.pages.length + (g.pages.length === 1 ? ' page' : ' pages')].filter(Boolean).join(' · ');
+    el.append(cb, no, st, what);
+    el.addEventListener('click', () => openViewer(g));
+    V.rows.set(g, { el, cb, st });
+    return el;
+  };
+  if (viewNow() === 'area') {
+    const folders = new Map();
+    for (const g of gs) {
+      const a = folderOf(g) || 'Not in a folder';
+      if (!folders.has(a)) folders.set(a, []);
+      folders.get(a).push(g);
+    }
+    for (const [a, list] of [...folders].sort((x, y) => x[0].localeCompare(y[0], undefined, { numeric: true }))) {
+      const det = document.createElement('details');
+      det.className = 'area';
+      det.open = true;
+      const sum = document.createElement('summary');
+      const name = document.createElement('span'); name.textContent = a;
+      const n = document.createElement('span'); n.className = 'n'; n.textContent = list.length + (list.length === 1 ? ' ITC' : ' ITCs');
+      const all = document.createElement('button');
+      all.type = 'button'; all.className = 'btn'; all.textContent = 'Tick all';
+      all.addEventListener('click', (e) => { e.preventDefault(); bulk(list.filter((g) => !g.ticked), () => true); });
+      sum.append(name, n, all);
+      det.append(sum, ...list.map(row));
+      wrap.append(det);
+    }
+  } else for (const g of gs) wrap.append(row(g));
+  // (files dropped again: the sheet open before is gone) Side by side opens the first ITC by itself
+  if (V.current && !gs.includes(V.current)) V.current = null;
+  if (viewNow() === 'side' && !V.current && gs.length) openViewer(gs.find(matches) || gs[0]);
+  else updateViews();
+}
+// The views brought up to date: which one shows, each row's tick and state, the search, the cards' filter.
+function updateViews() {
+  if ($('views').classList.contains('hidden')) { $('cards').classList.remove('hidden'); return; }
+  const v = viewNow();
+  $('view').value = V.view || savedView() || (phone() ? 'list' : 'side');
+  const lists = v !== 'all';
+  $('only-ticked-wrap').classList.toggle('hidden', v !== 'all');
+  $('split').classList.toggle('side', v === 'side');
+  $('split').classList.toggle('hidden', !lists);
+  // List and By folder: the viewer takes the list's place while open; Side by side: both, side by side
+  $('rows').classList.toggle('hidden', !lists || (v !== 'side' && !!V.current));
+  $('viewer').classList.toggle('hidden', !lists || !V.current);
+  $('v-back').classList.toggle('hidden', v === 'side');
+  $('cards').classList.toggle('hidden', lists);
+  for (const [g, r] of V.rows) {
+    r.cb.checked = !!g.ticked;
+    const [label, kind] = rowState(g);
+    r.st.textContent = label;
+    r.st.className = 'badge state ' + kind;
+    r.el.classList.toggle('hidden', !matches(g));
+    r.el.classList.toggle('current', V.current === g);
+  }
+  if (V.current) updateViewerBar();
+  // All sheets: the search, and Only ticked
+  const only = $('only-ticked').checked;
+  for (const g of S.groups) if (g.el) g.el.classList.toggle('hidden', v === 'all' && ((!g.cover && !matches(g)) || (only && !g.ticked)));
+}
+function pick(v) {
+  V.view = v;
+  try { localStorage.setItem(VIEW_KEY, v); } catch (e) { /* not kept: this time only */ }
+  // List and By folder start on the list (the sheet opened in Side by side closed)
+  if (viewNow() !== 'side') V.current = null;
+  buildViews();
+}
+$('view').addEventListener('change', () => pick($('view').value));
+$('search').addEventListener('input', () => updateViews());
+$('only-ticked').addEventListener('change', () => updateViews());
+$('sel-all').addEventListener('click', () => bulk(S.groups.filter((g) => !g.ticked), () => true));
+$('sel-none').addEventListener('click', () => bulk(S.groups, () => false));
+// waiting: still to sign here (not signed, not looking signed already, not optional only)
+$('sel-waiting').addEventListener('click', () => bulk(S.groups, waitingNow));
+window.matchMedia('(max-width: 760px)').addEventListener('change', () => { buildViews(); if (V.current) drawViewer(); });
+// Fit to width follows the viewer's own width (a window resized, the side panel's width)
+let fitTimer = 0, fitWidth = 0;
+new ResizeObserver(() => {
+  const w = $('v-scroll').clientWidth;
+  if (!V.current || !V.fit || !w || w === fitWidth) return;
+  fitWidth = w;
+  clearTimeout(fitTimer);
+  fitTimer = setTimeout(drawViewer, 150);
+}).observe($('v-scroll'));
+// A sheet needing its card (a click to place, a client block to tick): All sheets, then the card in sight.
+function showCard(g) {
+  if (viewNow() !== 'all') pick('all');
+  g.el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+/* ---------- the viewer: one sheet large, a page at a time ---------- */
+// Where his signature, name and date go are drawn on it as on the card, dragged and taken off there too; zoomed with
+// + / − and Fit to width, or two fingers; the page drawn again sharp at the zoom it ends on. Next / previous page; its
+// own tick and Sign; Back to the list.
+function openViewer(g) {
+  V.current = g;
+  V.page = Math.max(0, g.pages.indexOf(candidates(g)[0] || g.pages[0]));
+  V.fit = true;
+  $('v-title').textContent = g.title;
+  updateViews();
+  drawViewer();
+  if (viewNow() !== 'side') $('viewer').scrollIntoView({ block: 'start' });
+}
+// The viewer's own line under its bar: the ITC's tick, its state, how its pieces move, its Sign.
+function updateViewerBar() {
+  const g = V.current;
+  $('v-tick').checked = !!g.ticked;
+  const [label, kind] = rowState(g);
+  $('v-state').textContent = label;
+  $('v-state').className = 'badge ' + kind;
+  // the card's own words, its buttons (Put it back, Remove, Add client sign-off) pressing the card's
+  const how = $('v-how');
+  how.textContent = '';
+  for (const n of g.el ? g.el.querySelector('.how').childNodes : []) {
+    if (n.nodeType !== 1) { how.append(n.textContent); continue; }
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'link'; b.textContent = n.textContent;
+    b.addEventListener('click', () => { n.click(); if (V.current === g) drawViewer(); });
+    how.append(b);
+  }
+  $('v-sign').textContent = g.signed ? 'Signed ✓  (click to undo)' : 'Sign';
+  $('v-sign').classList.toggle('primary', !g.signed);
+  $('v-sign').disabled = !g.ticked;
+}
+$('v-tick').addEventListener('change', () => { if (V.current) setTick(V.current, $('v-tick').checked, true, false, true); });
+$('v-sign').addEventListener('click', () => { if (V.current) signOne(V.current); });
+$('v-back').addEventListener('click', () => {
+  const g = V.current;
+  V.current = null;
+  updateViews();
+  if (g && V.rows.get(g)) V.rows.get(g).el.scrollIntoView({ block: 'center' });
+});
+$('v-prev').addEventListener('click', () => { if (V.current && V.page > 0) { V.page--; drawViewer(); } });
+$('v-next').addEventListener('click', () => { if (V.current && V.page < V.current.pages.length - 1) { V.page++; drawViewer(); } });
+$('v-in').addEventListener('click', () => zoomBy(1.25));
+$('v-out').addEventListener('click', () => zoomBy(1 / 1.25));
+$('v-fit').addEventListener('click', () => { V.fit = true; drawViewer(); });
+function zoomBy(k) {
+  if (!V.current) return;
+  V.fit = false;
+  V.zoom = Math.max(0.25, Math.min(6, V.zoom * k));
+  drawViewer();
+}
+// The page drawn at the zoom (fit: the viewer's width), at the screen's own sharpness; one drawing at a time (a newer
+// one cancels the one still going), its places drawn over it.
+async function drawViewer() {
+  const g = V.current;
+  if (!g) return;
+  const pg = g.pages[V.page];
+  $('v-page').textContent = 'Page ' + (V.page + 1) + ' of ' + g.pages.length;
+  $('v-prev').disabled = V.page === 0;
+  $('v-next').disabled = V.page === g.pages.length - 1;
+  updateViewerBar();
+  const page = await pg.file.pdf.getPage(pg.index + 1);
+  const base = page.getViewport({ scale: 1 });
+  const room = Math.max(200, $('v-scroll').clientWidth - 16);
+  if (V.fit) V.zoom = room / base.width;
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
+  const vp = page.getViewport({ scale: V.zoom * dpr });
+  const box = $('v-box'), pdf = $('v-pdf'), ov = $('v-ov');
+  V.vp = null; // (until this drawing is shown: the places then drawn by it)
+  for (const d of viewSurf.holds) d.hidden = true; // (its pieces' holds placed again once drawn)
+  if (V.drawing) { try { V.drawing.cancel(); } catch (e) { /* done already */ } }
+  const c = document.createElement('canvas');
+  c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+  V.drawing = page.render({ canvasContext: ctx, canvas: c, viewport: vp });
+  try { await V.drawing.promise; } catch (e) { return; } // (a newer drawing took its place)
+  if (V.current !== g || g.pages[V.page] !== pg) return;
+  box.style.transform = '';
+  box.style.width = Math.round(base.width * V.zoom) + 'px';
+  box.style.height = Math.round(base.height * V.zoom) + 'px';
+  pdf.width = ov.width = c.width; pdf.height = ov.height = c.height;
+  pdf.getContext('2d').drawImage(c, 0, 0);
+  V.vp = vp; V.vpOf = g; V.vpPage = V.page;
+  drawOn(viewSurf);
+}
+// the viewer's sheet takes a tap and a drag as the card's does
+listenOn(viewSurf, $('v-box'));
+// Two fingers on the sheet: the page scaled as they move, drawn again sharp when they lift.
+(() => {
+  const at = new Map();
+  let start = 0, k = 1;
+  const sc = $('v-scroll');
+  const gap = () => { const [a, b] = [...at.values()]; return Math.hypot(a.x - b.x, a.y - b.y); };
+  sc.addEventListener('pointerdown', (e) => { if (e.pointerType !== 'mouse') at.set(e.pointerId, { x: e.clientX, y: e.clientY }); if (at.size === 2) { start = gap(); k = 1; } });
+  sc.addEventListener('pointermove', (e) => {
+    if (!at.has(e.pointerId)) return;
+    at.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (at.size === 2 && start) { k = Math.max(0.25, Math.min(6, gap() / start)); $('v-box').style.transform = 'scale(' + k + ')'; }
+  });
+  const end = (e) => {
+    at.delete(e.pointerId);
+    if (at.size < 2 && start) { start = 0; if (Math.abs(k - 1) > 0.02) zoomBy(k); else $('v-box').style.transform = ''; }
+  };
+  sc.addEventListener('pointerup', end);
+  sc.addEventListener('pointercancel', end);
+})();
+// (for the browser test) the views' state, and where a piece of a sheet's page on show is on the screen (or its ×):
+// { x, y }, or null; `viewer`: on the viewer's sheet rather than the card's
+window.__signerViews = V;
+window.__signerPiece = (title, role, close, viewer) => {
+  const g = S.groups.find((x) => x.title === title);
+  const s = viewer ? viewSurf : g && cardSurf(g);
+  if (!g || !s || s.g !== g || !s.vp) return null;
+  for (const o of owners(g.pages[s.page])) {
+    const r = pieceRectsOn(s, o.p).find((x) => x.role === role);
+    if (!r) continue;
+    const ov = s.ov, b = ov.getBoundingClientRect();
+    const [cx, cy] = close ? [r.close.x, r.close.y] : [(r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2];
+    return { x: b.left + (cx * b.width) / ov.width, y: b.top + (cy * b.height) / ov.height };
+  }
+  return null;
+};
+// (for the browser test) what a sheet's page (from 0) will be signed with: each place's texts, by piece
+window.__signerPlaces = (title, page) => {
+  const g = S.groups.find((x) => x.title === title);
+  return g ? signPlaces(g.pages[page]).map((p) => p.texts.map((t) => [t.role || '', t.str])) : null;
+};
 
 /* ---------- reading scans (OCR) ---------- */
 let tesseract = null;
@@ -1259,6 +1859,8 @@ async function runOcr() {
       progress('Reading scanned sheets: ' + (++done) + ' of ' + todo.length, done, todo.length);
       updateCard(g);
       if (g.vp) renderSheet(g);
+      // open in the viewer (Side by side): the page where its signature goes, drawn again with its pieces
+      if (V.current === g) { V.page = g.shown; drawViewer(); }
       refresh();
     }
   } catch (e) {
@@ -1323,7 +1925,6 @@ async function rowsPage(pg, worker) {
     if (!m) return false;
     const inked = (k) => !!m[k] && SignCore.inkIn(look, SignCore.fracRect(m[k], pg.box));
     const printed = inked('company');
-    if (printed) delete m.company;
     const already = inked('sign') ? 'There is already a signature in the client box' : null;
     pg.targets = [{ map: m, heading: m.heading, optional: false, block: null, manual: null, already, on: !already, rows: true, guess: m.guess, printed }];
     pg.already = already;

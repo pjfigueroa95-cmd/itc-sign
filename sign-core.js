@@ -145,7 +145,19 @@ var SignCore = (function () {
     var W = box.x1 - box.x0, H = box.y1 - box.y0;
     var bx = box.x0 + c.x * W, bw = c.w * W, bh = c.h * H, by = box.y1 - (c.y + c.h) * H;
     var sig = { x: bx + 4, y: by + 2, h: Math.max(10, Math.min(36, bh - 4)), maxW: Math.max(40, bw - 8) };
-    return { sig: sig, texts: [{ str: [name, date].filter(Boolean).join('   '), x: sig.x, y: by - 11, size: 9 }] };
+    return { sig: sig, texts: [{ str: underText(name, date), x: sig.x, y: by - 11, size: 9, role: 'under' }] };
+  }
+
+  // The line under a signature where the sheet has no Name or Date box of its own: name and date, three spaces apart.
+  function underText(name, date) {
+    return [name, date].filter(Boolean).join('   ');
+  }
+
+  // A text of a placement with the piece it is (name, date, company, label, or name and date under the signature), so
+  // the page can move or take off each piece on its own (from QC Suite's signing page). Null stays null.
+  function withRole(t, role) {
+    if (t) t.role = role;
+    return t;
   }
 
   // A layout map sign-off (QCMS's form map; a sign pack's client_blocks hint): {sign, name?, date?, company?},
@@ -163,11 +175,75 @@ var SignCore = (function () {
     if (inside) {
       var bx = box.x0 + s.sign.x * W, bw = s.sign.w * W, by = box.y1 - (s.sign.y + s.sign.h) * H;
       var nameW = Math.min(bw / 2, name.trim().length * INSIDE_NAME_SIZE * 0.52); // Helvetica, about half an em a letter
-      texts.push({ str: name.trim(), x: bx + bw - 4 - nameW, y: by + 3, size: INSIDE_NAME_SIZE });
+      texts.push({ str: name.trim(), x: bx + bw - 4 - nameW, y: by + 3, size: INSIDE_NAME_SIZE, role: 'name' });
       sig = { x: sig.x, y: sig.y, h: sig.h, maxW: Math.max(40, sig.maxW - nameW - 6) };
     }
-    [boxText(s.name, box, name), boxText(s.date, box, date), boxText(s.company, box, company)].forEach(function (t) { if (t) texts.push(t); });
+    [withRole(boxText(s.name, box, name), 'name'), withRole(boxText(s.date, box, date), 'date'), withRole(boxText(s.company, box, company), 'company')].forEach(function (t) { if (t) texts.push(t); });
     return { sig: sig, texts: texts };
+  }
+
+  // Whether the form prints this company inside a box (fractions of the page from the top-left) already: the words in
+  // the box hold the company's name, so it isn't written there again. Only the company itself counts: a label
+  // ("Company:"), a line to write on or other words leave the box to be filled. items as textItems gives them.
+  function printedIn(items, c, box, company) {
+    var want = String(company || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!c || !want) return false;
+    var words = wordsIn(items, c, box).join(' ');
+    return (' ' + words.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + ' ').indexOf(' ' + want + ' ') >= 0;
+  }
+  // The words printed inside a box (fractions of the page from the top-left): each item whose middle is in it.
+  function wordsIn(items, c, box) {
+    var r = fracRect(c, box);
+    return (items || []).filter(function (i) {
+      var mx = i.x + (i.w || 0) / 2, my = i.y + (i.h || 0) * 0.35;
+      return String(i.str || '').trim() && mx > r.x0 && mx < r.x1 && my > r.y0 && my < r.y1;
+    }).map(function (i) { return String(i.str); });
+  }
+
+  // The small label under a signature the client adds anywhere (a photo page too), {name}, {date} and {company} filled in.
+  var ADDED_LABEL = 'Signed by: {name}, {company}, Client Representative, {date}';
+  function addedLabel(template, name, date, company) {
+    var t = String(template || '').trim() || ADDED_LABEL;
+    var v = { name: String(name || '').trim(), date: String(date || '').trim(), company: String(company || '').trim() };
+    return plainText(t.replace(/\{(name|date|company)\}/g, function (all, k) { return v[k]; }))
+      .replace(/\s+,/g, ',').replace(/,(\s*,)+/g, ',').replace(/[\s,]+$/, '').replace(/\s+/g, ' ').trim();
+  }
+
+  // A placement with the client's own changes to it, piece by piece (the safety net when a box isn't quite right):
+  // adj.moves { sig | name | date | company | under | label: { dx, dy } } moves only that piece, adj.off lists the
+  // pieces taken off with the ×. With the signature taken off nothing is stamped there: null.
+  function adjustPlace(p, adj) {
+    if (!p || !adj) return p;
+    var off = adj.off || [], moves = adj.moves || {};
+    if (off.indexOf('sig') >= 0) return null;
+    var m = moves.sig;
+    var sig = m ? { x: p.sig.x + m.dx, y: p.sig.y + m.dy, h: p.sig.h, maxW: p.sig.maxW } : p.sig;
+    var texts = p.texts.filter(function (t) { return !t.role || off.indexOf(t.role) < 0; }).map(function (t) {
+      var d = t.role && moves[t.role];
+      if (!d) return t;
+      var o = {};
+      for (var k in t) o[k] = t[k];
+      o.x = t.x + d.dx; o.y = t.y + d.dy;
+      return o;
+    });
+    var out = { sig: sig, texts: texts };
+    if (p.frame) out.frame = p.frame;
+    return out;
+  }
+
+  // Each piece of a placement as a rectangle in PDF units (y up), for the page's drag and ×: the signature at the size
+  // it is drawn (fitImage with the picture's shape, or its box before there is one), each text with a role from its
+  // baseline at the size it is drawn. width(str, size) measures a text, else about half an em a letter (Helvetica).
+  function pieceRects(p, aspect, width) {
+    var r = aspect ? fitImage(p.sig, aspect) : { x: p.sig.x, y: p.sig.y, w: Math.min(p.sig.maxW, p.sig.h * 3.5), h: p.sig.h };
+    var out = [{ role: 'sig', x0: r.x, y0: r.y, x1: r.x + r.w, y1: r.y + r.h }];
+    p.texts.forEach(function (t) {
+      if (!t.role) return;
+      var size = width ? fitSize(t, width) : t.size;
+      var w = width ? width(t.str, size) : t.str.length * size * 0.52;
+      out.push({ role: t.role, x0: t.x, y0: t.y - size * 0.25, x1: t.x + w, y1: t.y + size * 0.85 });
+    });
+    return out;
   }
 
   // A box given as fractions of the page from the top-left, in PDF units {x0, y0, x1, y1}.
@@ -393,7 +469,7 @@ var SignCore = (function () {
       sig: { x: sx, y: sig.y - 3, h: h, maxW: Math.max(40, fieldRight - sx) },
       name: null, date: null, sigFilled: sig.filled
     };
-    ['name', 'date'].forEach(function (k) {
+    ['name', 'date', 'company'].forEach(function (k) {
       var L = labels[k];
       if (L) result[k] = { x: colX, y: L.y, size: Math.max(7, Math.min(14, L.size)), filled: L.filled };
     });
@@ -456,16 +532,16 @@ var SignCore = (function () {
   }
 
   // Works out what to draw on one page.
-  function placement(pg, name, date) {
+  function placement(pg, name, date, company) {
     var box = pg.box;
     if (pg.manual) {
       var h = pg.auto ? pg.auto.sig.h : 26;
       var x = pg.manual.x, y = pg.manual.y - h / 2;
       var sig = { x: x, y: y, h: h, maxW: Math.max(40, box.x1 - x - 10) };
-      if (pg.auto) return withInsideName(sig, autoTexts(pg.auto, name, date), pg.auto, name);
-      return { sig: sig, texts: [{ str: [name, date].filter(Boolean).join('   '), x: x, y: y - 11, size: 9 }] };
+      if (pg.auto) return withInsideName(sig, autoTexts(pg.auto, name, date, company), pg.auto, name);
+      return { sig: sig, texts: [{ str: underText(name, date), x: x, y: y - 11, size: 9, role: 'under' }] };
     }
-    if (pg.auto) return withInsideName(pg.auto.sig, autoTexts(pg.auto, name, date), pg.auto, name);
+    if (pg.auto) return withInsideName(pg.auto.sig, autoTexts(pg.auto, name, date, company), pg.auto, name);
     return null;
   }
 
@@ -479,16 +555,19 @@ var SignCore = (function () {
     var w = Math.min(sig.maxW / 2, name.length * INSIDE_NAME_SIZE * 0.52); // Helvetica, about half an em a letter
     return {
       sig: { x: sig.x, y: sig.y, h: sig.h, maxW: Math.max(40, sig.maxW - w - 6) },
-      texts: texts.concat([{ str: name, x: sig.x + sig.maxW - w, y: sig.y + 1, size: INSIDE_NAME_SIZE }]),
+      texts: texts.concat([{ str: name, x: sig.x + sig.maxW - w, y: sig.y + 1, size: INSIDE_NAME_SIZE, role: 'name' }]),
     };
   }
 
-  function autoTexts(a, name, date) {
+  function autoTexts(a, name, date, company) {
     var t = [];
-    if (a.name && !a.name.filled && name) t.push({ str: name, x: a.name.x, y: a.name.y, size: a.name.size });
-    if (a.date && !a.date.filled && date) t.push({ str: date, x: a.date.x, y: a.date.y, size: a.date.size });
+    // (each with its piece, so the page moves or takes off each on its own)
+    if (a.name && !a.name.filled && name) t.push({ str: name, x: a.name.x, y: a.name.y, size: a.name.size, role: 'name' });
+    if (a.date && !a.date.filled && date) t.push({ str: date, x: a.date.x, y: a.date.y, size: a.date.size, role: 'date' });
+    // the block's own Company line, when the caller gives a company (the client's signing page) and nothing is there
+    if (a.company && !a.company.filled && company) t.push({ str: plainText(company), x: a.company.x, y: a.company.y, size: a.company.size, role: 'company' });
     // inline blocks have no Name or Date line: both go small under the signature
-    if (a.under && (name || date)) t.push({ str: [name, date].filter(Boolean).join('   '), x: a.under.x, y: a.under.y, size: a.under.size });
+    if (a.under && (name || date)) t.push({ str: underText(name, date), x: a.under.x, y: a.under.y, size: a.under.size, role: 'under' });
     return t;
   }
 
@@ -762,6 +841,16 @@ var SignCore = (function () {
     return rgba;
   }
 
+  // Whether a page has words to read (a digital sheet, or a scan made searchable): any words but a label's. A scanned
+  // sheet that carries only its ITC number label as words ("<ITC no.> Rev 0", beside its QR) is still a picture.
+  function hasWords(items) {
+    var words = (items || []).map(function (i) { return String(i.str || ''); }).join(' ').split(/\s+/).filter(function (w) {
+      // a document number (letters and digits in two or more parts, a digit in it), "Rev", a number
+      return w && !(/^[a-z0-9_.]+(-[a-z0-9_.]+)+$/i.test(w) && /\d/.test(w)) && !/^rev\.?$/i.test(w) && !/^[\d.\-\/]+$/.test(w);
+    });
+    return words.join('').length > 3;
+  }
+
   // The sign-off blocks drawn on a sheet: each heading band with the ruled rows under it (within 160 points, above the
   // next band), in columns side by side. [{ band, cols: [{ head, x0, x1, rows: [{ box, label }] }] }], rectangles
   // { x0, y0, x1, y1 } in the page's units. A band with no rows under it is not a block.
@@ -770,13 +859,17 @@ var SignCore = (function () {
     var bands = headingBands(look), lines = ruledLines(look), out = [];
     bands.forEach(function (b) {
       var below = bands.filter(function (o) { return o !== b && o.top < b.bottom - 2; }).reduce(function (m, o) { return Math.max(m, o.top); }, -Infinity);
+      // (the band's own ruled border just under it is left out: running the band's width, it would join its columns)
       var mine = lines.filter(function (l) {
-        return l.y < b.bottom - 3 && l.y > b.bottom - 160 && l.y > below + 3 && l.x0 >= b.x0 - 6 && l.x1 <= b.x1 + 6;
+        return l.y < b.bottom - 6 && l.y > b.bottom - 160 && l.y > below + 3 && l.x0 >= b.x0 - 6 && l.x1 <= b.x1 + 6;
       });
-      // columns: lines whose spans overlap by most of the shorter one
+      // columns: lines whose spans overlap by most of the shorter one, the shorter lines first; a line running across
+      // two columns (a footer's rule, a box round the block) joins neither
       var cols = [];
-      mine.sort(function (p, q) { return p.x0 - q.x0; }).forEach(function (l) {
-        var c = cols.filter(function (k) { return Math.min(k.x1, l.x1) - Math.max(k.x0, l.x0) > 0.6 * Math.min(k.x1 - k.x0, l.x1 - l.x0); })[0];
+      mine.sort(function (p, q) { return (p.x1 - p.x0) - (q.x1 - q.x0) || p.x0 - q.x0; }).forEach(function (l) {
+        var cs = cols.filter(function (k) { return Math.min(k.x1, l.x1) - Math.max(k.x0, l.x0) > 0.6 * Math.min(k.x1 - k.x0, l.x1 - l.x0); });
+        if (cs.length > 1) return;
+        var c = cs[0];
         if (c) { c.lines.push(l); c.x0 = Math.min(c.x0, l.x0); c.x1 = Math.max(c.x1, l.x1); }
         else cols.push({ x0: l.x0, x1: l.x1, lines: [l] });
       });
@@ -1028,7 +1121,7 @@ var SignCore = (function () {
   // A placement with the signer's company written in the block's Company box (the sign pack's hint), when
   // the block has one and the company is known.
   function withCompanyBox(place, c, box, company) {
-    var t = place && boxText(c, box, company);
+    var t = place && withRole(boxText(c, box, company), 'company');
     return t ? { sig: place.sig, texts: place.texts.concat([t]), frame: place.frame } : place;
   }
 
@@ -1390,7 +1483,8 @@ var SignCore = (function () {
            findCompanyBlock: findCompanyBlock, boxPlacement: boxPlacement, layoutPlacement: layoutPlacement,
            fracRect: fracRect, matchClientBlock: matchClientBlock,
            CHECK_HEADERS: CHECK_HEADERS, findChecklist: findChecklist, findContractorBlock: findContractorBlock, findTagsBox: findTagsBox,
-           pictureRows: pictureRows, cleanForOcr: cleanForOcr, pictureClientBlock: pictureClientBlock, inkIn: inkIn, headingBands: headingBands, ruledLines: ruledLines,
+           underText: underText, printedIn: printedIn, adjustPlace: adjustPlace, pieceRects: pieceRects, ADDED_LABEL: ADDED_LABEL, addedLabel: addedLabel,
+           pictureRows: pictureRows, hasWords: hasWords, cleanForOcr: cleanForOcr, pictureClientBlock: pictureClientBlock, inkIn: inkIn, headingBands: headingBands, ruledLines: ruledLines,
            STAMP: STAMP, stampPlacement: stampPlacement, emptySpot: emptySpot, inkInBox: inkInBox, rightBorder: rightBorder, bottomBorder: bottomBorder, blank: blank,
            fitImage: fitImage, stampPdf: stampPdf, isSigned: isSigned, plainText: plainText,
            leaveOutReason: leaveOutReason, parseQcms: parseQcms, hintPlacement: hintPlacement, ocrItems: ocrItems,
